@@ -4,7 +4,7 @@
 
 Shared Go library used by Broker, Listener, and Logger. It centralises data models, MongoDB collection helpers, RabbitMQ connection and queue setup, and JSON utilities so that each service stays thin.
 
-Toolbox is a local module in the Go workspace (`logwolf-server/go.work`) and is imported as `logwolf-toolbox/...`. It is never published to an external registry.
+Toolbox is a local module in the Go workspace (`go.work` at the repository root) and is imported as `logwolf-toolbox/...`. It is never published to an external registry.
 
 ## Package layout
 
@@ -131,7 +131,7 @@ Lightweight wrappers around `encoding/json` used consistently across services fo
 Toolbox has its own unit tests:
 
 ```bash
-cd logwolf-server/toolbox && go test ./... -v
+cd toolbox && go test ./... -v
 ```
 
 Because Toolbox is a library with no `main` package, it is not run or deployed independently — it is always compiled into the services that depend on it.

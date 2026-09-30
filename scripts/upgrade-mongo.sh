@@ -14,7 +14,7 @@
 # because the data is already newer, is skipped, so a directory that is already
 # on 8.0 goes through one no-op step.
 #
-# Usage, from logwolf-server/, with the stack stopped:
+# Usage, from the repository root, with the stack stopped:
 #
 #   docker compose down
 #   cp -a db-data/mongo db-data/mongo.bak     # a backup, in case

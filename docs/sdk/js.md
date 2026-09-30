@@ -1,6 +1,6 @@
 # JS SDK reference
 
-The Logwolf JS SDK ships as `@logwolf/client-js` on npm. It handles event creation, sampling, and delivery to your Logwolf instance.
+The Logwolf JS SDK ships as `@logwolf/client-js` on npm. It handles event creation, sampling, and delivery to your Logwolf instance. Its source lives in [logwolf-app/client-js](https://github.com/logwolf-app/client-js).
 
 ## Installation
 
@@ -15,7 +15,7 @@ npm install @logwolf/client-js
 | 2.x   | The multi-tenancy release or later: `getOne` uses its `GET /logs/:id` route       |
 | 1.x   | Any; `getOne` searches only the newest page of events                             |
 
-Upgrading from 1.x? See the [changelog](https://github.com/jpricardo/logwolf/blob/main/logwolf-client/js/CHANGELOG.md): `getOne` and `getAll`'s pagination changed.
+Upgrading from 1.x? See the [changelog](https://github.com/logwolf-app/client-js/blob/main/CHANGELOG.md): `getOne` and `getAll`'s pagination changed.
 
 ## Initialisation
 

@@ -11,8 +11,8 @@ Logwolf is self-hosted. Your logs never leave your server. This guide gets you f
 ## 1. Clone the repository
 
 ```bash
-git clone https://github.com/jpricardo/logwolf.git
-cd logwolf/logwolf-server
+git clone https://github.com/logwolf-app/logwolf.git
+cd logwolf
 ```
 
 ## 2. Create a GitHub OAuth app
@@ -32,7 +32,7 @@ Copy the **Client ID** and generate a **Client Secret** — you'll need both in 
 
 ## 3. Configure environment variables
 
-Create a `.env` file in `logwolf-server/`:
+Create a `.env` file in the repository root:
 
 ```bash
 # GitHub OAuth

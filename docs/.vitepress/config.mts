@@ -10,7 +10,7 @@ export default defineConfig({
 		nav: [
 			{ text: 'Guide', link: '/getting-started' },
 			{ text: 'SDK', link: '/sdk/js' },
-			{ text: 'GitHub', link: 'https://github.com/jpricardo/logwolf' },
+			{ text: 'GitHub', link: 'https://github.com/logwolf-app/logwolf' },
 		],
 
 		sidebar: [
@@ -28,7 +28,7 @@ export default defineConfig({
 			},
 		],
 
-		socialLinks: [{ icon: 'github', link: 'https://github.com/jpricardo/logwolf' }],
+		socialLinks: [{ icon: 'github', link: 'https://github.com/logwolf-app/logwolf' }],
 
 		footer: {
 			message: 'Released under the GNU GPL v3 License.',

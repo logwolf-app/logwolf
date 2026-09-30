@@ -22,7 +22,7 @@ import { CodeBlock } from './components/code-block';
 import { EventFeed } from './components/event-feed';
 import { Pipeline } from './components/pipeline';
 
-const GITHUB_URL = 'https://github.com/jpricardo/logwolf';
+const GITHUB_URL = 'https://github.com/logwolf-app/logwolf';
 const DOCS_URL = 'https://logwolf-docs.vercel.app';
 const NPM_URL = 'https://www.npmjs.com/package/@logwolf/client-js';
 
@@ -80,8 +80,8 @@ const features: { icon: LucideIcon; title: string; body: string }[] = [
 	},
 ];
 
-const serverCode = `git clone https://github.com/jpricardo/logwolf.git
-cd logwolf/logwolf-server
+const serverCode = `git clone https://github.com/logwolf-app/logwolf.git
+cd logwolf
 cp .env.example .env   # GitHub OAuth credentials and secrets
 docker compose up --build -d`;
 

@@ -49,7 +49,7 @@ Keep the `@public` matcher as it is. It forwards only the Broker's public routes
 
 ## Environment variables
 
-Create a `.env` file in `logwolf-server/`. The full reference:
+Create a `.env` file in the repository root. The full reference:
 
 | Variable                         | Required      | Description                                                                                                                                                                              |
 | -------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -101,7 +101,7 @@ https://logs.your-domain.com/auth
 ## Starting the stack
 
 ```bash
-cd logwolf-server
+cd logwolf
 docker compose up --build -d
 ```
 
@@ -113,7 +113,7 @@ docker compose logs caddy
 
 ## Persistence
 
-All data is stored in `db-data/` relative to `logwolf-server/`:
+All data is stored in `db-data/` in the repository root:
 
 ```
 db-data/
@@ -128,7 +128,7 @@ A simple backup script:
 
 ```bash
 #!/bin/bash
-tar -czf logwolf-backup-$(date +%Y%m%d).tar.gz logwolf-server/db-data/
+tar -czf logwolf-backup-$(date +%Y%m%d).tar.gz logwolf/db-data/
 ```
 
 ## Log retention
@@ -185,7 +185,7 @@ Only Caddy is exposed on ports 80 and 443, and it forwards only the Broker's pub
 ## Updating
 
 ```bash
-cd logwolf-server
+cd logwolf
 git pull
 docker compose up --build -d
 ```

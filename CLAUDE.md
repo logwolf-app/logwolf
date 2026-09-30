@@ -2,33 +2,29 @@
 
 ## Repo overview
 
-Logwolf is a self-hosted logging platform. It is a monorepo with two top-level areas:
-
-- `logwolf-client/js/` — JavaScript SDK (`@logwolf/client-js`) for sending events from applications
-- `logwolf-server/` — All backend services, the dashboard frontend, and Docker orchestration
+Logwolf is a self-hosted logging platform. This repository is the server: the backend services, the dashboard frontend, the documentation site (`docs/`), and Docker orchestration. The JavaScript SDK (`@logwolf/client-js`) for sending events from applications lives in its own repository, [logwolf-app/client-js](https://github.com/logwolf-app/client-js); the frontend consumes it from npm.
 
 ### Backend services (Go)
 
-Managed as a Go workspace (`logwolf-server/go.work`):
+Managed as a Go workspace (`go.work` at the repository root):
 
-| Service    | Path                      | Role                                                                                                       |
-| ---------- | ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `broker`   | `logwolf-server/broker`   | Public HTTP API gateway (chi router). Accepts events, pushes to RabbitMQ; proxies reads to logger via RPC. |
-| `listener` | `logwolf-server/listener` | RabbitMQ consumer. Forwards events to logger via RPC.                                                      |
-| `logger`   | `logwolf-server/logger`   | Only service with MongoDB access. Dual-server: RPC on port 5001, HTTP health check on port 80.             |
-| `toolbox`  | `logwolf-server/toolbox`  | Shared library: data models, RabbitMQ helpers, MongoDB utilities.                                          |
+| Service    | Path        | Role                                                                                                       |
+| ---------- | ----------- | ---------------------------------------------------------------------------------------------------------- |
+| `broker`   | `broker/`   | Public HTTP API gateway (chi router). Accepts events, pushes to RabbitMQ; proxies reads to logger via RPC. |
+| `listener` | `listener/` | RabbitMQ consumer. Forwards events to logger via RPC.                                                      |
+| `logger`   | `logger/`   | Only service with MongoDB access. Dual-server: RPC on port 5001, HTTP health check on port 80.             |
+| `toolbox`  | `toolbox/`  | Shared library: data models, RabbitMQ helpers, MongoDB utilities.                                          |
 
 ### Frontend (TypeScript)
 
-- `logwolf-server/frontend/` — React Router v7 SSR dashboard (React 19, Tailwind CSS 4, shadcn/ui)
-- `logwolf-client/js/` — TypeScript SDK built with Rollup
+- `frontend/` — React Router v7 SSR dashboard (React 19, Tailwind CSS 4, shadcn/ui)
 
 ### Infrastructure
 
 - RabbitMQ for async event ingestion
 - MongoDB 8.0 for persistence, run as a single-member replica set (`rs0`) because the data layer uses transactions. Compose's `mongo` healthcheck initiates the set the first time it runs, including on existing standalone volumes. Data from the `mongo:4.2` of earlier releases is brought forward with `scripts/upgrade-mongo.sh` (4.4 → 5.0 → 6.0 → 7.0 → 8.0); the integration suite runs the same images as compose
 - Caddy as reverse proxy (TLS termination)
-- Full stack via `logwolf-server/docker-compose.yml`
+- Full stack via `docker-compose.yml`
 
 ## Common commands
 
@@ -36,34 +32,23 @@ Managed as a Go workspace (`logwolf-server/go.work`):
 
 ```bash
 # Run a service locally
-cd logwolf-server/broker && go run ./cmd/api
+cd broker && go run ./cmd/api
 
 # Unit tests (broker + toolbox + logger)
-cd logwolf-server/broker && go test ./cmd/api/... -v
-cd logwolf-server/toolbox && go test ./... -v
-cd logwolf-server/logger && go test ./... -v
+cd broker && go test ./cmd/api/... -v
+cd toolbox && go test ./... -v
+cd logger && go test ./... -v
 
 # Integration tests (requires Docker — spins up real MongoDB + RabbitMQ)
-cd logwolf-server/integration && go test -tags integration ./... -v -timeout 5m
+cd integration && go test -tags integration ./... -v -timeout 5m
 
 # ...with the service subprocesses' output on stderr, when the stack won't come up
 LOGWOLF_TEST_VERBOSE=1 go test -tags integration ./... -v -timeout 5m
 ```
 
-Both JS projects use pnpm, pinned by `packageManager` in their `package.json`. Each has its own `pnpm-workspace.yaml` (they are separate projects, not a workspace) with `minimumReleaseAge: 1440`: pnpm will not install a version published less than 24 hours ago. The frontend exempts `@logwolf/client-js`, our own SDK, so a new release can be adopted at once, and allows `esbuild`'s build script.
+The frontend uses pnpm, pinned by `packageManager` in its `package.json`. Its `pnpm-workspace.yaml` sets `minimumReleaseAge: 1440`: pnpm will not install a version published less than 24 hours ago. It exempts `@logwolf/client-js`, our own SDK, so a new release can be adopted at once, and allows `esbuild`'s build script.
 
-### JS SDK (`logwolf-client/js`)
-
-```bash
-pnpm test              # vitest watch
-pnpm run coverage      # single run with coverage report
-pnpm run build         # tsc + rollup → dist/
-pnpm run lint          # oxlint
-pnpm run format        # oxfmt
-pnpm exec tsc --noEmit # typecheck (no script for it here)
-```
-
-### Frontend (`logwolf-server/frontend`)
+### Frontend (`frontend/`)
 
 ```bash
 pnpm run dev       # Vite dev server
@@ -71,12 +56,13 @@ pnpm run build     # react-router build
 pnpm test          # vitest (single run): libraries, and route loaders/actions with real sessions (app/test/routes.ts)
 pnpm run typecheck # react-router typegen + tsc
 pnpm run lint      # oxlint
+pnpm run format    # oxfmt
 ```
 
 ### Full stack
 
 ```bash
-# From logwolf-server/
+# From the repository root
 docker compose up
 ```
 
@@ -105,7 +91,7 @@ docker compose up
 
 ## Service details
 
-### Broker (`logwolf-server/broker`)
+### Broker (`broker/`)
 
 Entry point: `cmd/api/main.go`. Key files: `routes.go`, `handlers.go`, `middleware.go`.
 
@@ -115,11 +101,11 @@ Entry point: `cmd/api/main.go`. Key files: `routes.go`, `handlers.go`, `middlewa
 - Project access on internal routes: 404 when the project does not exist (or the id is malformed), 403 for a non-member or a member on an owner-only route, the same on every route. `authorizeProject` (`access.go`) decides with one `RPCServer.ProjectAccess` call; every `/projects/{id}/...` route declares its level with `requireProject(anyMember|ownerOnly)` in `routes.go` and reads the project and logger connection from the context
 - `requireAPIKey` middleware validates keys over logger RPC and caches the result for 60s. Revoking a key or deleting its project evicts it from that broker's cache at once (`forgetCachedKeys`); another broker replica would keep it until the entry expires. `requireInternalSecret` guards dashboard routes. The broker has no MongoDB client: key storage (`/projects/{id}/keys`) goes through logger RPC too
 
-### Listener (`logwolf-server/listener`)
+### Listener (`listener/`)
 
 Entry point: `cmd/api/main.go`. No external dependencies beyond toolbox. Pure consumer — no HTTP server. The consumer loop lives in `toolbox/event`: it keeps one RPC connection to logger, acknowledges a message only once the event is stored or dropped for good, and retries an unreachable logger with back-off, so a logger outage delays events instead of losing them. Delivery is at least once.
 
-### Logger (`logwolf-server/logger`)
+### Logger (`logger/`)
 
 Entry point: `cmd/api/main.go`. Key files: `rpc.go`, `routes.go`, `migrate.go`, `cleanup.go`, `projects.go`.
 
@@ -131,22 +117,13 @@ RPC methods (Go stdlib `net/rpc`):
 - `RPCServer.DeleteLog` — delete by filter, returns count
 - `RPCServer.ValidateAPIKey`, `ListAPIKeys`, `CreateAPIKey`, `RevokeAPIKey` — API key storage for the broker; replies never carry the hash, and revoke matches the project as well as the id
 
-### Toolbox (`logwolf-server/toolbox`)
+### Toolbox (`toolbox/`)
 
 Packages: `data` (Models, LogEntry, APIKey, Settings), `event` (emitter + consumer), `rabbitmq` (connection), `json` (helpers).
 
 The `data.Models` struct is the sole database accessor passed between services.
 
-### JS SDK (`logwolf-client/js`)
-
-Key files: `lib/client.ts` (Logwolf class), `lib/schema.ts` (Zod schemas), `lib/event.ts`.
-
-- `capture()` is synchronous; delivery is async and batched
-- Configurable `flushInterval`, `maxBatchSize`, `sampleRate`, `errorSampleRate`, `timeout`
-- Retry with exponential back-off (3 attempts); FIFO eviction when queue exceeds `maxBatchSize`
-- No singleton — callers instantiate their own `Logwolf`
-
-### Frontend (`logwolf-server/frontend`)
+### Frontend (`frontend/`)
 
 Key files: `app/root.tsx`, `app/lib/api.ts` (dashboard API client), `app/lib/auth.server.ts`.
 
@@ -166,12 +143,11 @@ The frontend instruments itself with `@logwolf/client-js` (`lib/logwolf.ts`) for
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every push to `main` and all PRs:
 
-1. Go unit tests (broker + toolbox + logger)
+1. Go unit tests (broker + toolbox + logger + listener)
 2. Integration tests
-3. JS SDK tests
-4. Frontend tests
+3. Frontend tests
 
-A separate workflow (`release-js-client.yml`) publishes the JS SDK to npm when a GitHub release is created. It refuses a release whose tag is not `v` + `package.json`'s version, and typechecks and tests before publishing. Bump `logwolf-client/js/package.json` and `CHANGELOG.md` first.
+The JS SDK is tested and released from its own repository, [logwolf-app/client-js](https://github.com/logwolf-app/client-js).
 
 ## Environment
 
@@ -203,9 +179,10 @@ Per-service env vars:
 
 Each project has an `OVERVIEW.md` under its `docs/` folder:
 
-- [`logwolf-client/js/docs/OVERVIEW.md`](logwolf-client/js/docs/OVERVIEW.md)
-- [`logwolf-server/broker/docs/OVERVIEW.md`](logwolf-server/broker/docs/OVERVIEW.md)
-- [`logwolf-server/listener/docs/OVERVIEW.md`](logwolf-server/listener/docs/OVERVIEW.md)
-- [`logwolf-server/logger/docs/OVERVIEW.md`](logwolf-server/logger/docs/OVERVIEW.md)
-- [`logwolf-server/toolbox/docs/OVERVIEW.md`](logwolf-server/toolbox/docs/OVERVIEW.md)
-- [`logwolf-server/frontend/docs/OVERVIEW.md`](logwolf-server/frontend/docs/OVERVIEW.md)
+- [`broker/docs/OVERVIEW.md`](broker/docs/OVERVIEW.md)
+- [`listener/docs/OVERVIEW.md`](listener/docs/OVERVIEW.md)
+- [`logger/docs/OVERVIEW.md`](logger/docs/OVERVIEW.md)
+- [`toolbox/docs/OVERVIEW.md`](toolbox/docs/OVERVIEW.md)
+- [`frontend/docs/OVERVIEW.md`](frontend/docs/OVERVIEW.md)
+
+The user-facing documentation site (VitePress) lives in the top-level `docs/`. The SDK's overview is in the [client-js repository](https://github.com/logwolf-app/client-js/blob/main/docs/OVERVIEW.md).

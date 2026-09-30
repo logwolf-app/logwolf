@@ -185,10 +185,10 @@ Dashboard → GET /projects/{id}/logs     → requireProject      → RPC call t
 
 ```bash
 # Run locally
-cd logwolf-server/broker && go run ./cmd/api
+cd broker && go run ./cmd/api
 
 # Unit tests
-cd logwolf-server/broker && go test ./cmd/api/... -v
+cd broker && go test ./cmd/api/... -v
 ```
 
 ## Relationship to other services

@@ -40,7 +40,8 @@ app/
 │   ├── api.ts            # Dashboard API client (calls Broker internal routes)
 │   ├── logwolf.ts        # Logwolf SDK setup for client-side error tracking
 │   ├── auth.server.ts    # Server-side GitHub OAuth logic
-│   ├── allowlist.server.ts # Who may sign in (users/orgs allowlist, deny by default)
+│   ├── signup.server.ts  # SignupPolicy: who may sign in, picked by LOGWOLF_EDITION
+│   ├── allowlist.server.ts # The self-hosted policy's users/orgs allowlist (deny by default)
 │   ├── session.server.ts # cookie session helpers
 │   ├── token.server.ts   # seals the GitHub token kept in the session
 │   ├── csrf.server.ts    # CSRF token generation + validation
@@ -108,7 +109,10 @@ so the role checks in the route are there to keep a stale tab from producing a
 bare "forbidden". Retention is open to any member, but only upwards: shortening
 it makes the next cleanup pass delete everything outside the new window, so a
 member sees the shorter options disabled, and the action checks the stored value
-with `lowersRetention` (`app/lib/retention.ts`) before calling the broker. API
+with `lowersRetention` (`app/lib/retention.ts`) before calling the broker. The
+options themselves come from the broker (`getRetention` answers `choices` from
+its `limits.Provider`), so a plan can offer fewer; a current value the choices no
+longer include is still shown, disabled (`retentionOptions`). API
 keys are not project settings; any member may create and revoke them on `/keys`.
 Owners change a member's role from a select in the members
 table; the last owner shows a plain badge instead, since the broker would refuse
@@ -132,7 +136,9 @@ rate-limited: that never blocks an owner.
 ## Authentication
 
 1. User initiates login via GitHub OAuth 2.0.
-2. On callback, the server checks the GitHub user against `LOGWOLF_ALLOWED_GITHUB_USERS` and
+2. On callback, the server asks the edition's `SignupPolicy` (`lib/signup.server.ts`) whether the
+   login may sign in; `LOGWOLF_EDITION` picks it once, at startup. Self-hosted, the default, checks
+   the GitHub user against `LOGWOLF_ALLOWED_GITHUB_USERS` and
    `LOGWOLF_ALLOWED_GITHUB_ORGS` (`lib/allowlist.server.ts`). Access is denied by default: the login
    must be in the users list or belong to an org in the orgs list. With both lists empty nobody can
    sign in, and the server logs an error at startup. Both lists are parsed like the logger's
@@ -171,6 +177,7 @@ Event payloads come back exactly as the broker stores them, so `getLogs`/`getLog
 | `LOGWOLF_ALLOWED_GITHUB_USERS` | Comma-separated list of allowed GitHub usernames                     |
 | `LOGWOLF_ALLOWED_GITHUB_ORGS`  | Comma-separated list of GitHub orgs whose members are allowed        |
 | `SESSION_SECRET`               | Signs session cookies; the key sealing GitHub tokens derives from it |
+| `LOGWOLF_EDITION`              | `selfhosted` (default) picks the allowlist as the `SignupPolicy`     |
 
 Copy `.env.example` to `.env` before running locally.
 

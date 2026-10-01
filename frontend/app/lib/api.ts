@@ -53,7 +53,11 @@ export type ProjectMember = {
 	created_at: string;
 };
 
-export type RetentionDays = 0 | 30 | 60 | 90 | 180 | 365;
+/**
+ * A project's retention in days, 0 being forever, and the values it may pick:
+ * the broker asks its edition's `limits.Provider`, so they differ by plan.
+ */
+export type Retention = { days: number; choices: number[] };
 
 export type Metrics = {
 	total_events: number;
@@ -77,8 +81,8 @@ export interface IApi {
 	getKeys(projectId: string): Promise<ApiKey[]>;
 	createKey(projectId: string, scopes: ApiKeyScope[]): Promise<CreatedApiKey>;
 	deleteKey(projectId: string, id: string): Promise<void>;
-	getRetention(projectId: string): Promise<{ days: RetentionDays }>;
-	updateRetention(projectId: string, days: number): Promise<{ days: RetentionDays }>;
+	getRetention(projectId: string): Promise<Retention>;
+	updateRetention(projectId: string, days: number): Promise<Retention>;
 	getMetrics(projectId: string): Promise<Metrics>;
 	getLogs(projectId: string, p: Pagination): Promise<LogwolfEventData[]>;
 	getLog(projectId: string, id: string): Promise<LogwolfEventData>;
@@ -223,24 +227,24 @@ export class Api implements IApi {
 		return json.data;
 	}
 
-	public async getRetention(projectId: string): Promise<{ days: RetentionDays }> {
+	public async getRetention(projectId: string): Promise<Retention> {
 		const res = await fetch(`${this.baseUrl}projects/${projectId}/retention`, {
 			method: 'GET',
 			headers: this.internalHeaders(),
 		});
-		const json = (await res.json()) as ApiResponse<{ days: RetentionDays }>;
+		const json = (await res.json()) as ApiResponse<Retention>;
 		if (json.error) throw new Error(json.message);
 
 		return json.data;
 	}
 
-	public async updateRetention(projectId: string, days: number): Promise<{ days: RetentionDays }> {
+	public async updateRetention(projectId: string, days: number): Promise<Retention> {
 		const res = await fetch(`${this.baseUrl}projects/${projectId}/retention`, {
 			method: 'PATCH',
 			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
 			body: JSON.stringify({ days }),
 		});
-		const json = (await res.json()) as ApiResponse<{ days: RetentionDays }>;
+		const json = (await res.json()) as ApiResponse<Retention>;
 		if (json.error) throw new Error(json.message);
 
 		return json.data;

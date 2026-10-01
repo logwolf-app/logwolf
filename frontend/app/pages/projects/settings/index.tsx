@@ -45,7 +45,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	const [members, retention] = await Promise.all([api.getMembers(project.id), api.getRetention(project.id)]);
 	event?.set('loaderData', { project, memberCount: members.length, days: retention.days });
 
-	return { project, members, days: retention.days, currentUser: user.login };
+	return { project, members, days: retention.days, choices: retention.choices, currentUser: user.login };
 }
 
 export async function action({ request, params, context }: Route.ActionArgs) {
@@ -151,7 +151,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 }
 
 export default function ProjectSettings({ loaderData }: Route.ComponentProps) {
-	const { project, members, days, currentUser } = loaderData;
+	const { project, members, days, choices, currentUser } = loaderData;
 	const isOwner = project.role === 'owner';
 
 	return (
@@ -166,7 +166,7 @@ export default function ProjectSettings({ loaderData }: Route.ComponentProps) {
 		>
 			<div className='flex flex-col gap-8'>
 				<GeneralSection project={project} canEdit={isOwner} />
-				<RetentionSection days={days} canLower={isOwner} />
+				<RetentionSection days={days} choices={choices} canLower={isOwner} />
 				<MembersSection members={members} currentUser={currentUser} canManage={isOwner} />
 				{isOwner && <DangerZone project={project} />}
 			</div>

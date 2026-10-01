@@ -1,18 +1,14 @@
 import { redirect } from 'react-router';
 
-import { allowlistFromEnv, isAllowed, isEmptyAllowlist, listGithubOrgs } from './allowlist.server';
 import { commitSession, destroySession, getSession } from './session.server';
+import { signupPolicyFromEnv } from './signup.server';
 import { sealToken } from './token.server';
 
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID!;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET!;
-const ALLOWLIST = allowlistFromEnv();
-
-if (isEmptyAllowlist(ALLOWLIST)) {
-	console.error(
-		'Neither LOGWOLF_ALLOWED_GITHUB_USERS nor LOGWOLF_ALLOWED_GITHUB_ORGS is set: nobody can sign in to the dashboard.',
-	);
-}
+// Picked by LOGWOLF_EDITION once, at startup, which an edition this build does
+// not have fails.
+const SIGNUP_POLICY = signupPolicyFromEnv();
 
 export function getGitHubAuthURL() {
 	const params = new URLSearchParams({
@@ -37,12 +33,13 @@ export async function handleGitHubCallback(code: string, request: Request) {
 	});
 	const user = await userRes.json();
 
-	// Deny by default: the login must be allowlisted or belong to an allowed org.
+	// Deny by default: the edition's policy must admit the login (self-hosted,
+	// it must be allowlisted or belong to an allowed org).
 	let allowed = false;
 	try {
-		allowed = await isAllowed(user.login, ALLOWLIST, () => listGithubOrgs(access_token));
+		allowed = await SIGNUP_POLICY.maySignIn(user.login, access_token);
 	} catch (err) {
-		console.error('Could not check the sign-in allowlist', err);
+		console.error('Could not check the sign-up policy', err);
 	}
 	if (!allowed) throw redirect('/auth?error=unauthorized');
 

@@ -26,7 +26,7 @@ describe('/projects/:id/settings', () => {
 		api = fakeApi({
 			getProjects: async () => [project(owned, 'owner', 'Owned'), project(joined, 'member', 'Joined')],
 			updateProject: async () => project(owned),
-			updateRetention: async (_id, days) => ({ days: days as 90 }),
+			updateRetention: async (_id, days) => ({ days, choices: [0, 30, 60, 90, 180, 365] }),
 			addMember: async () => {},
 			deleteProject: async () => {},
 			getMembers: async () => [],
@@ -70,8 +70,21 @@ describe('/projects/:id/settings', () => {
 	});
 
 	describe('retention', () => {
+		it('loads the choices the broker offers the project', async () => {
+			api.getRetention.mockResolvedValue({ days: 30, choices: [7, 30] });
+
+			const data = await loader({
+				request: get(`/projects/${owned}/settings`, cookie),
+				params: { id: owned },
+				context,
+			} as never);
+
+			expect(data).toMatchObject({ days: 30, choices: [7, 30] });
+			expect(api.getRetention).toHaveBeenCalledWith(owned);
+		});
+
 		it('lets a member raise it, but not lower it', async () => {
-			api.getRetention.mockResolvedValue({ days: 90 });
+			api.getRetention.mockResolvedValue({ days: 90, choices: [0, 30, 60, 90, 180, 365] });
 
 			expect(await send(joined, { intent: 'retention', days: '30' }, cookie)).toEqual({
 				error: 'Only an owner can lower retention.',

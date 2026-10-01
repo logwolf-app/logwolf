@@ -3,7 +3,13 @@ FROM node:22-alpine AS base
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 
-FROM base AS development-dependencies-env
+# The build's output is plain JavaScript, so it runs on the build machine's
+# platform: a multi-arch build emulates only the production install.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build-base
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable
+
+FROM build-base AS development-dependencies-env
 COPY . /app
 WORKDIR /app
 RUN pnpm install --frozen-lockfile
@@ -13,7 +19,7 @@ COPY ./package.json pnpm-lock.yaml pnpm-workspace.yaml /app/
 WORKDIR /app
 RUN pnpm install --frozen-lockfile --prod
 
-FROM base AS build-env
+FROM build-base AS build-env
 COPY . /app/
 COPY --from=development-dependencies-env /app/node_modules /app/node_modules
 WORKDIR /app

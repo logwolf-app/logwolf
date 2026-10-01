@@ -1,0 +1,24 @@
+# Runs the services from the images each release publishes, in place of
+# building them from this checkout. Use it on top of docker-compose.yml, from a
+# checkout of the same release, by setting in .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.images.yml
+#   LOGWOLF_VERSION=1.0.0
+#
+# See "Docker images" in docs/self-hosting.md.
+services:
+  frontend:
+    image: ghcr.io/logwolf-app/frontend:${LOGWOLF_VERSION:?set LOGWOLF_VERSION in .env}
+    build: !reset null
+
+  broker:
+    image: ghcr.io/logwolf-app/broker:${LOGWOLF_VERSION:?set LOGWOLF_VERSION in .env}
+    build: !reset null
+
+  logger:
+    image: ghcr.io/logwolf-app/logger:${LOGWOLF_VERSION:?set LOGWOLF_VERSION in .env}
+    build: !reset null
+
+  listener:
+    image: ghcr.io/logwolf-app/listener:${LOGWOLF_VERSION:?set LOGWOLF_VERSION in .env}
+    build: !reset null

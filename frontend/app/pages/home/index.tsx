@@ -83,7 +83,7 @@ const features: { icon: LucideIcon; title: string; body: string }[] = [
 const serverCode = `git clone https://github.com/logwolf-app/logwolf.git
 cd logwolf
 cp .env.example .env   # GitHub OAuth credentials and secrets
-docker compose up --build -d`;
+docker compose up -d`;
 
 const sdkCode = `import Logwolf, { LogwolfEvent } from '@logwolf/client-js';
 

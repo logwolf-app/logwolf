@@ -23,7 +23,8 @@ logwolf/
 ├── docs/                   # Documentation site (VitePress)
 ├── scripts/                # Operational scripts (MongoDB upgrade)
 ├── openapi.yaml            # Spec of the public API (checked by the broker's tests)
-├── docker-compose.yml      # Full stack orchestration
+├── docker-compose.yml      # Full stack orchestration (published images)
+├── docker-compose.build.yml # Override that builds the images from source
 └── go.work                 # Go workspace
 ```
 
@@ -33,10 +34,16 @@ The JS SDK (`@logwolf/client-js`) lives in its own repository, [logwolf-app/clie
 
 The recommended workflow depends on what you're working on.
 
+`docker-compose.yml` runs the images each release publishes. To run your changes instead, add `docker-compose.build.yml`, which builds the services from your checkout (Docker Compose 2.24 or later). Set it once in `.env`, and every `docker compose` command below builds from source (on Windows, separate the files with `;`):
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml
+```
+
 ### Full stack (simplest)
 
 ```bash
-cp .env.example .env  # fill in your GitHub OAuth credentials and secrets
+cp .env.example .env  # fill in your GitHub OAuth credentials and secrets, and COMPOSE_FILE as above
 docker compose up --build -d
 ```
 
@@ -103,7 +110,7 @@ pnpm run lint          # oxlint
 
 ### CI
 
-The Go unit tests, integration tests and frontend tests run on every push and pull request via GitHub Actions (`.github/workflows/ci.yml`). PRs must pass all checks before merging.
+The Go unit tests, integration tests and frontend tests run on every push and pull request via GitHub Actions (`.github/workflows/ci.yml`), which also builds the images from source through `docker-compose.build.yml`. PRs must pass all checks before merging.
 
 ## Code style
 

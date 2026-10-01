@@ -24,7 +24,7 @@ Managed as a Go workspace (`go.work` at the repository root):
 - RabbitMQ for async event ingestion
 - MongoDB 8.0 for persistence, run as a single-member replica set (`rs0`) because the data layer uses transactions. Compose's `mongo` healthcheck initiates the set the first time it runs, including on existing standalone volumes. Data from the `mongo:4.2` of earlier releases is brought forward with `scripts/upgrade-mongo.sh` (4.4 → 5.0 → 6.0 → 7.0 → 8.0); the integration suite runs the same images as compose
 - Caddy as reverse proxy (TLS termination)
-- Full stack via `docker-compose.yml`
+- Full stack via `docker-compose.yml`, which runs the published `ghcr.io/logwolf-app/<service>` images at `LOGWOLF_VERSION` (`latest` when unset); `docker-compose.build.yml` on top of it builds them from the checkout instead
 
 ## Common commands
 
@@ -62,9 +62,14 @@ pnpm run format    # oxfmt
 ### Full stack
 
 ```bash
-# From the repository root
+# From the repository root: the published images
 docker compose up
+
+# ...built from this checkout, for development
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 ```
+
+Setting `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in `.env` (`;` on Windows) makes every `docker compose` command build from source.
 
 ## Architecture notes
 
@@ -148,10 +153,11 @@ The frontend instruments itself with `@logwolf/client-js` (`lib/logwolf.ts`) for
 GitHub Actions (`.github/workflows/ci.yml`) runs on every push to `main` and all PRs:
 
 1. Go unit tests (broker + toolbox + logger + listener)
-2. Integration tests, with `LOGWOLF_EDITION=selfhosted`
+2. Integration tests, with `LOGWOLF_EDITION=selfhosted`. They run the services from source, as subprocesses, never from the published images
 3. Frontend tests
+4. The images, built from source through `docker-compose.build.yml`, after checking the override replaces every published image
 
-`.github/workflows/release.yml` runs when a GitHub release is published and attaches `openapi.yaml` to it, with `info.version` set from the tag. For a `v*` tag it also publishes the `broker`, `listener`, `logger` and `frontend` images to `ghcr.io/logwolf-app/<service>` for `linux/amd64` and `linux/arm64`, tagged with the version without its `v`, and `latest` when GitHub marks the release as its latest. The Go Dockerfiles cross-compile on the build platform and the frontend's builds there too, so only its production install runs emulated. `docker-compose.images.yml` runs those images in place of building them (`docs/self-hosting.md`, "Docker images").
+`.github/workflows/release.yml` runs when a GitHub release is published and attaches `openapi.yaml` to it, with `info.version` set from the tag. For a `v*` tag it also publishes the `broker`, `listener`, `logger` and `frontend` images to `ghcr.io/logwolf-app/<service>` for `linux/amd64` and `linux/arm64`, tagged with the version without its `v`, and `latest` when GitHub marks the release as its latest. The Go Dockerfiles cross-compile on the build platform and the frontend's builds there too, so only its production install runs emulated. `docker-compose.yml` runs those images (`docs/self-hosting.md`, "Docker images").
 
 The JS SDK is tested and released from its own repository, [logwolf-app/client-js](https://github.com/logwolf-app/client-js).
 
@@ -174,6 +180,7 @@ Per-service env vars:
 | `LOGGER_RPC_PORT`                | logger           | `5001`                        | RPC listen port                                                        |
 | `LOGGER_HTTP_PORT`               | logger           | `80`                          | HTTP health check port                                                 |
 | `CLEANUP_INTERVAL`               | logger           | `1h`                          | Per-project retention cleanup frequency                                |
+| `LOGWOLF_VERSION`                | compose          | `latest`                      | Tag of the published images `docker-compose.yml` runs                  |
 | `LOGWOLF_EDITION`                | broker, frontend | `selfhosted`                  | Picks `limits.Provider` and `SignupPolicy`; `cloud` is not built yet   |
 | `LOGWOLF_ALLOWED_GITHUB_USERS`   | frontend, logger | —                             | Dashboard allowlist; also the owners of the migrated `Default` project |
 | `LOGWOLF_ALLOWED_GITHUB_ORGS`    | frontend         | —                             | Dashboard allowlist by org membership                                  |

@@ -141,6 +141,7 @@ The frontend uses React Router v7 with file-based routing. New pages go in `fron
 3. Make sure all tests pass locally before opening a PR.
 4. Open a PR against `main` with a clear description of what changed and why.
 5. Keep PRs focused — one concern per PR is easier to review than a sprawling change.
+6. On your first PR, sign the [Contributor License Agreement](./CLA.md) when the CLA Assistant bot asks. It takes one click (you sign in with GitHub on cla-assistant.io) and covers all your future PRs. A PR cannot be merged until its author has signed.
 
 There is no formal review SLA. Small, well-scoped PRs get reviewed faster.
 
@@ -156,4 +157,6 @@ Open a GitHub issue. Include:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [GNU GPL v3](./LICENSE).
+By contributing, you agree that your contributions will be licensed under the [GNU AGPL v3](./LICENSE) (`AGPL-3.0-only`), and that you have signed the [Contributor License Agreement](./CLA.md).
+
+The CLA is a licence, not a transfer: you keep the copyright in your work. It also lets the maintainer license your contributions under other terms than the AGPL, which is what allows the hosted Logwolf Cloud to run them without publishing its own code.

@@ -170,7 +170,7 @@ export default function Home() {
 							<div>
 								<p className='mb-6 inline-flex items-center gap-2 rounded-sm border bg-card px-2.5 py-1 font-mono text-xs tracking-wide text-muted-foreground uppercase'>
 									<span className='size-1.5 rounded-[1px] bg-primary' aria-hidden />
-									Self-hosted · Open source · GPL v3
+									Self-hosted · Open source · AGPL v3
 								</p>
 								<h1 className='text-4xl font-semibold tracking-tight text-balance sm:text-6xl'>
 									Your logs stay on <br className='hidden sm:block' />
@@ -280,7 +280,7 @@ export default function Home() {
 					<div className='mx-auto flex max-w-6xl flex-col gap-4 px-6 py-8 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between'>
 						<span className='flex items-center gap-2'>
 							<LogoMark className='size-4' />
-							Logwolf · GNU GPL v3
+							Logwolf · GNU AGPL v3
 						</span>
 						<nav className='flex gap-5'>
 							<a href={DOCS_URL} className='hover:text-foreground'>

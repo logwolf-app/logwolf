@@ -5,8 +5,8 @@ info:
   # The release workflow stamps the release's tag here on the copy it publishes.
   version: unreleased
   license:
-    name: GPL-3.0-only
-    identifier: GPL-3.0-only
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
   description: |
     The routes an application reaches over the internet: the SDK's event
     routes, which take an API key, and the health checks, which take nothing.

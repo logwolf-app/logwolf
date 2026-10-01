@@ -208,4 +208,8 @@ Fork, create a feature branch, send a PR. Keep changes focused; add tests and up
 
 ## License
 
-GNU GPL v3 — see [LICENSE](./LICENSE).
+GNU AGPL v3 (`AGPL-3.0-only`) — see [LICENSE](./LICENSE). This covers the server: the services, the dashboard and the docs site.
+
+The AGPL is the GPL plus one condition: if you modify Logwolf and let other people use it over a network, such as by hosting it as a service, you must offer those users the source of your modified version. Running Logwolf unmodified, or modifying it for your own use, asks nothing of you beyond the GPL. The dashboard's home page links to this repository; on a modified deployment, point it at your own source.
+
+The JavaScript SDK, which goes into your application, has its own permissive licence in [its repository](https://github.com/logwolf-app/client-js).

@@ -156,4 +156,4 @@ Open a GitHub issue. Include:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [GNU GPL v3](./LICENSE).
+By contributing, you agree that your contributions will be licensed under the [GNU AGPL v3](./LICENSE) (`AGPL-3.0-only`).

@@ -204,7 +204,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for running the test suites and the PR 
 
 ## Contributing
 
-Fork, create a feature branch, send a PR. Keep changes focused; add tests and update docs. See [CONTRIBUTING.md](./CONTRIBUTING.md).
+Fork, create a feature branch, send a PR. Keep changes focused; add tests and update docs. Contributors sign a [CLA](./CLA.md) on their first PR. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 

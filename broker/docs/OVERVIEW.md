@@ -62,7 +62,7 @@ Everything that acts on one project is under `/projects/{id}`.
 | `GET`    | `/projects/{id}/keys`            | member | List API keys                                        |
 | `POST`   | `/projects/{id}/keys`            | member | Create an API key; `scopes` default: ingest          |
 | `DELETE` | `/projects/{id}/keys/{keyID}`    | member | Revoke an API key; another project's is a 404        |
-| `GET`    | `/projects/{id}/retention`       | member | Get retention (`{"days": n}`)                        |
+| `GET`    | `/projects/{id}/retention`       | member | Get retention (`{"days": n, "choices": [...]}`)      |
 | `PATCH`  | `/projects/{id}/retention`       | member | Update retention; lowering it is owner-only (below)  |
 | `GET`    | `/projects/{id}/metrics`         | member | Usage analytics                                      |
 
@@ -116,8 +116,12 @@ the handler's choosing:
 | `data.ErrLastOwner`                                    | 400    | Removing or demoting the last owner                |
 | Anything else                                          | 500    | The logger or MongoDB failed                       |
 
-Retention days are checked against `data.ValidRetentionDays` before the logger is
-called. A missing `days` is a 400 as well, rather than 0 (keep forever).
+Retention days are checked against the project's choices before the logger is
+called: what the edition's `limits.Provider` offers it (`Config.Limits`; a
+`Config` without one is self-hosted, which offers every one of
+`data.ValidRetentionDays`). Anything else is a 400, and so is a missing `days`,
+rather than 0 (keep forever). `GET` and `PATCH` both answer with the choices, so
+the dashboard lists what the project may pick. A provider that fails is a 500.
 
 ### Health
 
@@ -169,6 +173,7 @@ Dashboard → GET /projects/{id}/logs     → requireProject      → RPC call t
 | `LOGGER_RPC_ADDR`     | `logger:5001`                 | Logger RPC address             |
 | `INTERNAL_API_SECRET` | —                             | Shared secret for dashboard    |
 | `TRUSTED_PROXIES`     | — (trust no one)              | See below                      |
+| `LOGWOLF_EDITION`     | `selfhosted`                  | Picks the `limits.Provider`    |
 
 `TRUSTED_PROXIES` is a comma-separated list of IPs and CIDR ranges. A request from one of them is attributed to the right-most `X-Forwarded-For` entry that is not itself trusted (`clientIP` in `clientip.go`); any other request is attributed to its peer address, and its `X-Forwarded-For` is ignored. The failed-auth rate limiter counts per that address. Behind Caddy it must cover Caddy, or every internet client shares Caddy's counter and ten bad keys from anyone lock out all SDK clients for a minute. `docker-compose.yml` trusts the private ranges, which is safe only while the broker publishes no port. An entry that is not an IP or range stops the broker at start.
 

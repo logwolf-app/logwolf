@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"logwolf-toolbox/data"
 	"net"
 	"net/http"
 	"net/rpc"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -245,6 +247,21 @@ func (app *Config) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 
 type retentionResponse struct {
 	Days int `json:"days"`
+	// Choices are the values the project may pick, from the edition's
+	// limits.Provider, in the order the dashboard lists them.
+	Choices []int `json:"choices"`
+}
+
+// retentionChoices asks the edition which retention values the project may
+// pick, answering the request itself when it cannot say.
+func (app *Config) retentionChoices(w http.ResponseWriter, r *http.Request, projectID string) ([]int, bool) {
+	choices, err := app.limitsProvider().RetentionChoices(r.Context(), projectID)
+	if err != nil {
+		log.Printf(`{"event":"retention_choices","outcome":"error","project_id":%q,"error":%q}`, projectID, err.Error())
+		app.errorJSON(w, fmt.Errorf("could not look up the retention choices"), http.StatusInternalServerError)
+		return nil, false
+	}
+	return choices, true
 }
 
 func (app *Config) GetRetention(w http.ResponseWriter, r *http.Request) {
@@ -256,7 +273,12 @@ func (app *Config) GetRetention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Data: retentionResponse{Days: days}})
+	choices, ok := app.retentionChoices(w, r, p.id)
+	if !ok {
+		return
+	}
+
+	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Data: retentionResponse{Days: days, Choices: choices}})
 }
 
 func (app *Config) UpdateRetention(w http.ResponseWriter, r *http.Request) {
@@ -275,9 +297,14 @@ func (app *Config) UpdateRetention(w http.ResponseWriter, r *http.Request) {
 		app.errorJSON(w, fmt.Errorf("days is required"), http.StatusBadRequest)
 		return
 	}
-	// The logger refuses these too, but checking here spares the round trip and
-	// the string matching to tell its refusal apart from a failure.
-	if !data.ValidRetentionDays[*payload.Days] {
+	// Only what the edition offers this project. The logger refuses anything
+	// outside data.ValidRetentionDays too, but checking here spares the round
+	// trip and the string matching to tell its refusal apart from a failure.
+	choices, ok := app.retentionChoices(w, r, p.id)
+	if !ok {
+		return
+	}
+	if !slices.Contains(choices, *payload.Days) {
 		app.errorJSON(w, fmt.Errorf("invalid retention: %d days", *payload.Days), http.StatusBadRequest)
 		return
 	}
@@ -304,7 +331,7 @@ func (app *Config) UpdateRetention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Data: retentionResponse{Days: *payload.Days}})
+	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Data: retentionResponse{Days: *payload.Days, Choices: choices}})
 }
 
 func (app *Config) GetMetrics(w http.ResponseWriter, r *http.Request) {

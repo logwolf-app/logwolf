@@ -15,34 +15,20 @@ import {
 	SelectValue,
 } from '~/components/ui/select';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
-import type { RetentionDays } from '~/lib/api';
-import { lowersRetention } from '~/lib/retention';
+import { lowersRetention, retentionLabel, retentionOptions } from '~/lib/retention';
 
 import { type SettingsActionResult, useSuccessToast } from '../action-result';
 import { SettingsFooter, SettingsRow } from './settings-row';
 
-type RetentionDaysMap<T extends number> = {
-	[P in T as `${P}`]: string;
-};
-
-const retentionDaysMap: RetentionDaysMap<RetentionDays> = {
-	0: 'Forever',
-	30: '30 days',
-	60: '60 days',
-	90: '90 days',
-	180: '180 days',
-	365: '365 days',
-};
-
-const retentionOptions = Object.entries(retentionDaysMap);
-
 type Props = {
-	days: RetentionDays;
+	days: number;
+	/** What this project may pick, as the broker's limits allow. */
+	choices: number[];
 	/** Owners only: a member may keep logs longer, never shorter. */
 	canLower: boolean;
 };
 
-export function RetentionSection({ days, canLower }: Props) {
+export function RetentionSection({ days, choices, canLower }: Props) {
 	const csrfToken = useCsrfToken();
 	const fetcher = useFetcher<SettingsActionResult>();
 	useSuccessToast(fetcher.data);
@@ -75,13 +61,13 @@ export function RetentionSection({ days, canLower }: Props) {
 								<SelectContent>
 									<SelectGroup>
 										<SelectLabel>Retention time</SelectLabel>
-										{retentionOptions.map(([value, label]) => (
+										{retentionOptions(days, choices).map((value) => (
 											<SelectItem
 												key={value}
-												value={value}
-												disabled={!canLower && lowersRetention(days, Number(value))}
+												value={value.toString()}
+												disabled={!choices.includes(value) || (!canLower && lowersRetention(days, value))}
 											>
-												{label}
+												{retentionLabel(value)}
 											</SelectItem>
 										))}
 									</SelectGroup>

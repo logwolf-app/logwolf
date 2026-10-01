@@ -22,6 +22,8 @@ toolbox/
 │   ├── emitter.go   # RabbitMQ message publisher
 │   ├── consumer.go  # RabbitMQ message consumer: manual acks, retries
 │   └── logger_client.go # The consumer's one reused RPC connection to Logger
+├── limits/
+│   └── limits.go    # LimitsProvider: what an edition lets a project do
 ├── rabbitmq/
 │   └── connect.go   # RabbitMQ connection initialisation
 └── json/
@@ -109,6 +111,12 @@ Declares the RabbitMQ topology used by all services:
 
 `emitter.go` wraps `amqp.Channel.Publish` for structured event publishing.  
 `consumer.go` provides `NewConsumer` + `Listen`, the main loop used by Listener. It acknowledges a message only once Logger has stored the event or it has been dropped for good, and retries an unreachable Logger with back-off; see the [Listener overview](../../listener/docs/OVERVIEW.md#delivery-guarantees) for the rules. `logger_client.go` holds the one RPC connection it reuses for every event.
+
+## `limits` package
+
+`Provider` is the extension point between self-hosted and hosted Logwolf: it answers "may this project ingest `n` more events?" (`AllowIngest`) and "which retention values may it pick?" (`RetentionChoices`). Project ids are hex strings, as services pass them to each other. Every retention choice must be one of `data.ValidRetentionDays`, the only values the logger stores.
+
+`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which allows any ingest and offers every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` has no provider in this build yet and, like any unknown name, is an error, so a hosted deployment never runs on self-hosted limits by accident. The Broker asks it for retention choices; the ingest check has no caller yet.
 
 ## `rabbitmq` package
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"logwolf-toolbox/event"
+	"logwolf-toolbox/limits"
 	"net/http"
 	"net/netip"
 	"os"
@@ -24,10 +25,28 @@ type Config struct {
 	// TrustedProxies are the peers whose X-Forwarded-For is believed when
 	// working out a client's address (see clientIP). Empty trusts no one.
 	TrustedProxies []netip.Prefix
+
+	// Limits is what the edition lets a project do (see limitsProvider).
+	Limits limits.Provider
+}
+
+// limitsProvider is app.Limits, or self-hosted's when there is none: a Config
+// left without limits is a self-hosted broker, the way tests build one.
+func (app *Config) limitsProvider() limits.Provider {
+	if app.Limits == nil {
+		return limits.SelfHosted{}
+	}
+	return app.Limits
 }
 
 func main() {
 	trusted, err := trustedProxiesFromEnv()
+	if err != nil {
+		log.Panic(err)
+	}
+
+	// LOGWOLF_EDITION, self-hosted unless set otherwise.
+	lim, err := limits.FromEnv()
 	if err != nil {
 		log.Panic(err)
 	}
@@ -42,6 +61,7 @@ func main() {
 	app := Config{
 		Events:         emitter,
 		TrustedProxies: trusted,
+		Limits:         lim,
 	}
 
 	srv := &http.Server{

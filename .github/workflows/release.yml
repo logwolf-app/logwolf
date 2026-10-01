@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  openapi:
+    name: Attach the OpenAPI spec
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # The release's tag, so the spec is the API of the release.
+      - uses: actions/checkout@v4
+
+      # In place of info.version's placeholder, leaving the rest as written.
+      - name: Stamp the release's version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${TAG#v}"
+          sed -i "s/^  version: unreleased$/  version: ${version}/" openapi.yaml
+          grep -qx "  version: ${version}" openapi.yaml || { echo "openapi.yaml has no 'version: unreleased' under info" >&2; exit 1; }
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" openapi.yaml --clobber

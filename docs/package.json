@@ -8,7 +8,9 @@
 	"main": "index.js",
 	"scripts": {
 		"test": "echo \"Error: no test specified\" && exit 1",
+		"predev": "node scripts/copy-openapi.mjs",
 		"dev": "vitepress dev",
+		"prebuild": "node scripts/copy-openapi.mjs",
 		"build": "vitepress build",
 		"preview": "vitepress preview"
 	},

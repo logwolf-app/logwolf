@@ -10,6 +10,7 @@ export default defineConfig({
 		nav: [
 			{ text: 'Guide', link: '/getting-started' },
 			{ text: 'SDK', link: '/sdk/js' },
+			{ text: 'API', link: '/api' },
 			{ text: 'GitHub', link: 'https://github.com/logwolf-app/logwolf' },
 		],
 
@@ -25,6 +26,10 @@ export default defineConfig({
 			{
 				text: 'SDK',
 				items: [{ text: 'JavaScript', link: '/sdk/js' }],
+			},
+			{
+				text: 'Reference',
+				items: [{ text: 'HTTP API', link: '/api' }],
 			},
 		],
 

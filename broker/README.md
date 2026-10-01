@@ -14,11 +14,19 @@ This service is designed to decouple log ingestion from processing. It accepts l
 
 ## Endpoints
 
-| Method | Path    | Description                                                      |
-| ------ | ------- | ---------------------------------------------------------------- |
-| `POST` | `/logs` | Submit a new log entry. Returns `202 Accepted` immediately.      |
-| `GET`  | `/logs` | Retrieve a list of stored logs. Returns `200 OK` with JSON data. |
-| `GET`  | `/ping` | Health check.                                                    |
+The public routes, which Caddy serves under `/api`, are specified in [`openapi.yaml`](../openapi.yaml) at the repository root; `cmd/api/openapi_test.go` holds the spec against the routes.
+
+| Method   | Path          | Description                                                  |
+| -------- | ------------- | ------------------------------------------------------------ |
+| `POST`   | `/logs`       | Submit an event. `202 Accepted` once RabbitMQ has queued it. |
+| `POST`   | `/logs/batch` | Submit up to 1000 events at once.                            |
+| `GET`    | `/logs`       | One page of the key's project's events, newest first.        |
+| `GET`    | `/logs/{id}`  | One event of the key's project.                              |
+| `DELETE` | `/logs`       | Delete an event of the key's project.                        |
+| `GET`    | `/health`     | Readiness: RabbitMQ and the logger.                          |
+| `GET`    | `/ping`       | Liveness.                                                    |
+
+The dashboard's routes, under `/projects`, are internal and not part of the spec.
 
 ## Dependencies
 

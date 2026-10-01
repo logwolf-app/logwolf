@@ -72,6 +72,8 @@ docker compose up
 
 **Networks:** Only Caddy, Broker, and Frontend are on the public network. Logger, Listener, RabbitMQ, and MongoDB are isolated on an internal network. Caddy forwards only the broker's public routes (`@public` in the `Caddyfile`: `/api/logs`, `/api/logs/*`, `/api/health`, `/api/ping`); the dashboard routes are internal-only, since they trust `X-User-Login` once the secret checks out. `broker/cmd/api/caddy_test.go` holds the `Caddyfile` against the broker's routes, so a new public route outside those paths, or a wider Caddy rule, fails the tests
 
+**Public API contract:** `openapi.yaml` at the repository root (OpenAPI 3.1) describes the public routes: auth, scopes (as the security requirement's list), pagination bounds, and every status each route answers. `broker/cmd/api/openapi_test.go` holds it against the broker: the operations must be exactly the public routes, each one's scope must match `publicRoutes` in `scope_test.go`, the bounds must match `data.MaxPage`/`MaxPageSize`/`DefaultPageSize` and `maxBatchSize`, and `apiCases` sends requests through the real router to check every status the broker answers is documented with a body of the documented shape, and every documented status is produced. Changing a public route's behavior means changing the spec, and adding a case for any new status. The docs site serves a copy (`docs/scripts/copy-openapi.mjs`, run before `dev` and `build`), and `.github/workflows/release.yml` attaches it, stamped with the version, to each published release
+
 **API authentication:**
 
 - SDK/API clients: Bearer tokens with `lw_` prefix, validated and cached with TTL + rate limiting per client IP (in broker middleware; the IP comes from `X-Forwarded-For` only when the peer is in `TRUSTED_PROXIES`)
@@ -146,6 +148,8 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push to `main` and all
 1. Go unit tests (broker + toolbox + logger + listener)
 2. Integration tests
 3. Frontend tests
+
+`.github/workflows/release.yml` runs when a GitHub release is published and attaches `openapi.yaml` to it, with `info.version` set from the tag.
 
 The JS SDK is tested and released from its own repository, [logwolf-app/client-js](https://github.com/logwolf-app/client-js).
 

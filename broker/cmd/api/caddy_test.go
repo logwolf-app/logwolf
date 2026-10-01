@@ -49,8 +49,12 @@ func caddyForwards(patterns []string, path string) bool {
 }
 
 type brokerRoute struct {
-	method, path string // path with its parameters filled in
-	internal     bool
+	method  string
+	pattern string // as routes.go declares it, e.g. /logs/{id}
+	path    string // pattern with its parameters filled in
+
+	internal bool // takes the internal secret: a dashboard route
+	apiKey   bool // takes an API key: an SDK route
 }
 
 // brokerRoutes lists every route the broker serves, sorted into public and
@@ -59,6 +63,9 @@ type brokerRoute struct {
 // Bearer header, and the health checks answer.
 func brokerRoutes(t *testing.T) []brokerRoute {
 	t.Helper()
+	// Every SDK route counts the request as a failed authentication; enough of
+	// them and the address gets a 429, which reads as neither kind.
+	resetAuthCaches(t)
 	t.Setenv("INTERNAL_API_SECRET", "caddy-test-secret")
 	// /health asks the logger; a closed port answers at once.
 	t.Setenv("LOGGER_RPC_ADDR", "127.0.0.1:1")
@@ -71,14 +78,19 @@ func brokerRoutes(t *testing.T) []brokerRoute {
 		path := fill.Replace(route)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(method, path, nil))
-		routes = append(routes, brokerRoute{method, path, strings.Contains(w.Body.String(), `"unauthorized"`)})
+		body := w.Body.String()
+		routes = append(routes, brokerRoute{
+			method: method, pattern: route, path: path,
+			internal: strings.Contains(body, `"unauthorized"`),
+			apiKey:   strings.Contains(body, "Authorization header"),
+		})
 		return nil
 	}
 	if err := chi.Walk(h.(chi.Routes), walk); err != nil {
 		t.Fatalf("walk routes: %v", err)
 	}
 	// Answered by middleware rather than a route, so chi.Walk does not see it.
-	routes = append(routes, brokerRoute{http.MethodGet, "/ping", false})
+	routes = append(routes, brokerRoute{method: http.MethodGet, pattern: "/ping", path: "/ping"})
 	return routes
 }
 

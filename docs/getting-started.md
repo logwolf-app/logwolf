@@ -70,10 +70,10 @@ Restart your browser after running this.
 ## 5. Start the stack
 
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
 
-This starts six services: Caddy, Frontend, Broker, Logger, Listener, MongoDB, and RabbitMQ. Give it 30–60 seconds on first boot for all services to initialise.
+Compose pulls Logwolf's images, which each release publishes to the GitHub Container Registry (`latest` unless you set `LOGWOLF_VERSION` in `.env`; see [Docker images](./self-hosting.md#docker-images)). This starts six services: Caddy, Frontend, Broker, Logger, Listener, MongoDB, and RabbitMQ. Give it 30–60 seconds on first boot for all services to initialise.
 
 ## 6. Sign in and generate an API key
 

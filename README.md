@@ -74,8 +74,10 @@ Then restart your browser.
 ### 5. Start the stack
 
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
+
+Compose pulls the services' images, published by each release to `ghcr.io/logwolf-app`. For a long-lived install, check out a release and pin its version with `LOGWOLF_VERSION` in `.env`; see [Docker images](https://logwolf-docs.vercel.app/self-hosting.html#docker-images).
 
 - **Dashboard:** https://localhost
 - **API:** https://localhost/api
@@ -151,11 +153,18 @@ logwolf/
 ├── docs/                   # Documentation site (VitePress)
 ├── scripts/                # Operational scripts (MongoDB upgrade)
 ├── Caddyfile               # Reverse proxy / TLS config
-├── docker-compose.yml      # Full stack orchestration
+├── docker-compose.yml      # Full stack orchestration (published images)
+├── docker-compose.build.yml # Override that builds the images from source
 └── go.work                 # Go workspace
 ```
 
 ## Local development
+
+`docker-compose.yml` runs the published images. To run your own changes, build them from source with `docker-compose.build.yml` on top of it; setting this in `.env` makes every `docker compose` command below do so (on Windows, separate the files with `;`):
+
+```
+COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml
+```
 
 - **Frontend only:** `docker compose up -d broker mongo rabbitmq caddy`, then run the dev server in `frontend/`:
 
@@ -169,7 +178,7 @@ logwolf/
 
 - **Backend only:** `docker compose up -d mongo rabbitmq`, then run the Go services individually with `go run ./cmd/api` from `broker/`, `logger/` and `listener/`. Give them the credentials from `.env`: `MONGO_USERNAME` and `MONGO_PASSWORD` for the logger, and `RABBITMQ_URL=amqp://<user>:<password>@<host>` for the broker and listener.
 
-- **Full stack:** `docker compose up --build -d`
+- **Full stack:** `docker compose up --build -d`, with `COMPOSE_FILE` set as above
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for running the test suites and the PR process.
 

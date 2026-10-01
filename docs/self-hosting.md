@@ -66,6 +66,7 @@ Create a `.env` file in the repository root. The full reference:
 | `MONGO_PASSWORD`                 | ✅            | Its password. Minimum 32 random bytes on a new install.                                                                                                                                  |
 | `RABBITMQ_USERNAME`              | ✅            | RabbitMQ user, created when the node first starts. URL-safe characters only.                                                                                                             |
 | `RABBITMQ_PASSWORD`              | ✅            | Its password. URL-safe characters only; `openssl rand -hex 32` is.                                                                                                                       |
+| `LOGWOLF_VERSION`                | Recommended   | The release whose [images](#docker-images) to run, without its `v` (e.g. `1.2.0`). Unset, `latest`. Set it to the release your checkout is at.                                           |
 
 Generate secrets with:
 
@@ -86,6 +87,7 @@ MONGO_PASSWORD=<output of openssl rand -hex 32>
 RABBITMQ_USERNAME=logwolf
 RABBITMQ_PASSWORD=<output of openssl rand -hex 32>
 API_KEY=lw_<your key from the Keys page>
+LOGWOLF_VERSION=1.2.0
 ```
 
 MongoDB 8.0 needs a CPU with AVX on x86-64 (any 64-bit ARM works). On an old or oddly virtualized VPS without it, `mongod` exits at start with an illegal instruction; check with `grep -m1 -o avx /proc/cpuinfo`.
@@ -100,12 +102,15 @@ https://logs.your-domain.com/auth
 
 ## Starting the stack
 
+Check out the release you want to run, and set `LOGWOLF_VERSION` in `.env` to its version, so the images Compose pulls match your `docker-compose.yml` and `Caddyfile` (see [Docker images](#docker-images)):
+
 ```bash
 cd logwolf
-docker compose up --build -d
+git checkout v1.2.0
+docker compose up -d
 ```
 
-On first boot, Caddy will request a certificate from Let's Encrypt. This takes a few seconds. Check the logs if the site doesn't come up:
+Compose pulls the images first. On first boot, Caddy will request a certificate from Let's Encrypt. This takes a few seconds. Check the logs if the site doesn't come up:
 
 ```bash
 docker compose logs caddy
@@ -113,7 +118,7 @@ docker compose logs caddy
 
 ## Docker images
 
-`docker compose up --build` builds the services from your checkout. Each release also publishes them, built for `linux/amd64` and `linux/arm64`, to the GitHub Container Registry:
+Each release publishes the services, built for `linux/amd64` and `linux/arm64`, to the GitHub Container Registry, and `docker-compose.yml` runs them from there:
 
 | Service   | Image                          |
 | --------- | ------------------------------ |
@@ -124,18 +129,21 @@ docker compose logs caddy
 
 Each image is tagged with the release's version, without its `v` (release `v1.2.0` is `1.2.0`), and the latest release's also as `latest`. MongoDB, RabbitMQ and Caddy are their official images, pinned in `docker-compose.yml`.
 
-To run the published images instead of building them, check out the release you want, so that `docker-compose.yml` matches its images, and add two lines to `.env`:
+`docker-compose.yml` takes the version from `LOGWOLF_VERSION`, and runs `latest` without it. Pin it to the release your checkout is at: `latest` moves on its own, while your `docker-compose.yml` and `Caddyfile` do not, and an update can come with steps to take first, as [below](#updating).
+
+### Building from source
+
+To build the services from your checkout instead, for changes of your own, add `docker-compose.build.yml`, which swaps each image for a build. It needs Docker Compose 2.24 or later:
 
 ```bash
-git checkout v1.2.0
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d
 ```
+
+To make every `docker compose` command use it, set `COMPOSE_FILE` in `.env` (on Windows, separate the files with `;`). `LOGWOLF_VERSION` is then ignored:
 
 ```bash
-COMPOSE_FILE=docker-compose.yml:docker-compose.images.yml
-LOGWOLF_VERSION=1.2.0
+COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml
 ```
-
-`docker-compose.images.yml` swaps each service's build for its image at `LOGWOLF_VERSION`, and Compose reads both files from `COMPOSE_FILE` on every command, so `docker compose up -d` pulls the images and starts them. It needs Docker Compose 2.24 or later. Pin a version rather than `latest`: an update can come with steps to take first, as [below](#updating).
 
 ## Persistence
 
@@ -210,13 +218,7 @@ Only Caddy is exposed on ports 80 and 443, and it forwards only the Broker's pub
 
 ## Updating
 
-```bash
-cd logwolf
-git pull
-docker compose up --build -d
-```
-
-With the [published images](#docker-images), check out the new release instead, set `LOGWOLF_VERSION` in `.env` to its version, and pull:
+Read the release's notes and the sections below for steps to take first. Then check out the new release, set `LOGWOLF_VERSION` in `.env` to its version, and start the stack, which pulls the new images:
 
 ```bash
 cd logwolf
@@ -225,6 +227,8 @@ git checkout v1.3.0
 # set LOGWOLF_VERSION=1.3.0 in .env
 docker compose up -d
 ```
+
+Without `LOGWOLF_VERSION`, run `docker compose pull` before `docker compose up -d`: Compose does not look for a newer `latest` on its own. If you [build from source](#building-from-source), pull the new code and run `docker compose up --build -d`.
 
 Caddy, MongoDB, and RabbitMQ use pinned image versions in `docker-compose.yml`. Update these deliberately, not automatically.
 
@@ -267,11 +271,13 @@ Releases before this one ran `mongo:4.2` and `rabbitmq:3.9`, with the MongoDB cr
    scripts/upgrade-mongo.sh
    ```
 
-4. **Start the new stack.**
+4. **Start the new stack**, at the new release as in [Updating](#updating):
 
    ```bash
-   git pull
-   docker compose up --build -d
+   git fetch --tags
+   git checkout v1.3.0
+   # set LOGWOLF_VERSION=1.3.0 in .env
+   docker compose up -d
    ```
 
 5. **Change the MongoDB password** from the old default, then put the new one in `.env` and recreate the containers that use it:

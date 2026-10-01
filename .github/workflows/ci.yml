@@ -68,3 +68,33 @@ jobs:
       - name: Run tests
         working-directory: frontend
         run: pnpm test
+
+  build-images:
+    name: Build the images from source
+    runs-on: ubuntu-latest
+    # Compose refuses to read its files without these; nothing runs, so any
+    # value does.
+    env:
+      SESSION_SECRET: ci
+      INTERNAL_API_SECRET: ci
+      MONGO_USERNAME: ci
+      MONGO_PASSWORD: ci
+      RABBITMQ_USERNAME: ci
+      RABBITMQ_PASSWORD: ci
+      COMPOSE_FILE: docker-compose.yml:docker-compose.build.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      # docker-compose.yml alone pulls the published images; the override must
+      # replace every one of them with a build.
+      - name: Check the build override
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose config --quiet
+          if docker compose config --images | grep '^ghcr.io/logwolf-app/'; then
+            echo "docker-compose.build.yml leaves the services above on their published images" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: docker compose build

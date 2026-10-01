@@ -1,10 +1,13 @@
 version: '3'
 
+# Logwolf's own services run from the images each release publishes, at
+# LOGWOLF_VERSION (latest when unset). Pin it to the release this checkout is
+# at, so this file matches its images; see "Docker images" in
+# docs/self-hosting.md. To build them from this checkout instead, add
+# docker-compose.build.yml.
 services:
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: ./frontend.dockerfile
+    image: ghcr.io/logwolf-app/frontend:${LOGWOLF_VERSION:-latest}
     restart: always
     deploy:
       mode: replicated
@@ -23,9 +26,7 @@ services:
       - internal
 
   broker:
-    build:
-      context: .
-      dockerfile: ./broker/broker.dockerfile
+    image: ghcr.io/logwolf-app/broker:${LOGWOLF_VERSION:-latest}
     restart: always
     deploy:
       mode: replicated
@@ -44,9 +45,7 @@ services:
       - internal
 
   logger:
-    build:
-      context: .
-      dockerfile: ./logger/logger.dockerfile
+    image: ghcr.io/logwolf-app/logger:${LOGWOLF_VERSION:-latest}
     restart: always
     depends_on:
       mongo:
@@ -67,9 +66,7 @@ services:
       - internal
 
   listener:
-    build:
-      context: .
-      dockerfile: ./listener/listener.dockerfile
+    image: ghcr.io/logwolf-app/listener:${LOGWOLF_VERSION:-latest}
     restart: always
     deploy:
       mode: replicated

@@ -111,6 +111,32 @@ On first boot, Caddy will request a certificate from Let's Encrypt. This takes a
 docker compose logs caddy
 ```
 
+## Docker images
+
+`docker compose up --build` builds the services from your checkout. Each release also publishes them, built for `linux/amd64` and `linux/arm64`, to the GitHub Container Registry:
+
+| Service   | Image                          |
+| --------- | ------------------------------ |
+| Broker    | `ghcr.io/logwolf-app/broker`   |
+| Listener  | `ghcr.io/logwolf-app/listener` |
+| Logger    | `ghcr.io/logwolf-app/logger`   |
+| Dashboard | `ghcr.io/logwolf-app/frontend` |
+
+Each image is tagged with the release's version, without its `v` (release `v1.2.0` is `1.2.0`), and the latest release's also as `latest`. MongoDB, RabbitMQ and Caddy are their official images, pinned in `docker-compose.yml`.
+
+To run the published images instead of building them, check out the release you want, so that `docker-compose.yml` matches its images, and add two lines to `.env`:
+
+```bash
+git checkout v1.2.0
+```
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.images.yml
+LOGWOLF_VERSION=1.2.0
+```
+
+`docker-compose.images.yml` swaps each service's build for its image at `LOGWOLF_VERSION`, and Compose reads both files from `COMPOSE_FILE` on every command, so `docker compose up -d` pulls the images and starts them. It needs Docker Compose 2.24 or later. Pin a version rather than `latest`: an update can come with steps to take first, as [below](#updating).
+
 ## Persistence
 
 All data is stored in `db-data/` in the repository root:
@@ -188,6 +214,16 @@ Only Caddy is exposed on ports 80 and 443, and it forwards only the Broker's pub
 cd logwolf
 git pull
 docker compose up --build -d
+```
+
+With the [published images](#docker-images), check out the new release instead, set `LOGWOLF_VERSION` in `.env` to its version, and pull:
+
+```bash
+cd logwolf
+git fetch --tags
+git checkout v1.3.0
+# set LOGWOLF_VERSION=1.3.0 in .env
+docker compose up -d
 ```
 
 Caddy, MongoDB, and RabbitMQ use pinned image versions in `docker-compose.yml`. Update these deliberately, not automatically.

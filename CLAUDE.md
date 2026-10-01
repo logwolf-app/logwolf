@@ -151,7 +151,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push to `main` and all
 2. Integration tests, with `LOGWOLF_EDITION=selfhosted`
 3. Frontend tests
 
-`.github/workflows/release.yml` runs when a GitHub release is published and attaches `openapi.yaml` to it, with `info.version` set from the tag.
+`.github/workflows/release.yml` runs when a GitHub release is published and attaches `openapi.yaml` to it, with `info.version` set from the tag. For a `v*` tag it also publishes the `broker`, `listener`, `logger` and `frontend` images to `ghcr.io/logwolf-app/<service>` for `linux/amd64` and `linux/arm64`, tagged with the version without its `v`, and `latest` when GitHub marks the release as its latest. The Go Dockerfiles cross-compile on the build platform and the frontend's builds there too, so only its production install runs emulated. `docker-compose.images.yml` runs those images in place of building them (`docs/self-hosting.md`, "Docker images").
 
 The JS SDK is tested and released from its own repository, [logwolf-app/client-js](https://github.com/logwolf-app/client-js).
 

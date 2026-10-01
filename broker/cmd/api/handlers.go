@@ -28,6 +28,9 @@ func (app *Config) CreateLog(w http.ResponseWriter, r *http.Request) {
 	app.publishEvents(w, r, payload)
 }
 
+// maxBatchSize is the most events POST /logs/batch takes at once; more is a 413.
+const maxBatchSize = 1000
+
 func (app *Config) CreateLogBatch(w http.ResponseWriter, r *http.Request) {
 	var payloads []data.JSONLogPayload
 
@@ -42,8 +45,8 @@ func (app *Config) CreateLogBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(payloads) > 1000 {
-		app.errorJSON(w, fmt.Errorf("batch size %d exceeds maximum of 1000", len(payloads)), http.StatusRequestEntityTooLarge)
+	if len(payloads) > maxBatchSize {
+		app.errorJSON(w, fmt.Errorf("batch size %d exceeds maximum of %d", len(payloads), maxBatchSize), http.StatusRequestEntityTooLarge)
 		return
 	}
 

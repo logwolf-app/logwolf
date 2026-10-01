@@ -1,0 +1,536 @@
+openapi: 3.1.0
+
+info:
+  title: Logwolf public API
+  # The release workflow stamps the release's tag here on the copy it publishes.
+  version: unreleased
+  license:
+    name: GPL-3.0-only
+    identifier: GPL-3.0-only
+  description: |
+    The routes an application reaches over the internet: the SDK's event
+    routes, which take an API key, and the health checks, which take nothing.
+    The dashboard's routes are internal and are not part of this API.
+
+    ## Authentication
+
+    Every `/logs` route takes a project API key as a Bearer token:
+    `Authorization: Bearer lw_...`. Keys are created on the dashboard's Keys
+    page, and the key decides the project: there is no project parameter.
+
+    A key carries scopes, and each route demands one:
+
+    | Scope    | Routes                               |
+    | -------- | ------------------------------------ |
+    | `ingest` | `POST /logs`, `POST /logs/batch`     |
+    | `read`   | `GET /logs`, `GET /logs/{id}`        |
+    | `delete` | `DELETE /logs`                       |
+
+    A new key gets `ingest` alone unless its creator picks more, since keys
+    ship in browser bundles. Keys created before scopes existed have all
+    three. A key without the route's scope gets a `403`.
+
+    ## Rate limiting
+
+    Failed authentications are counted per client address: once an address
+    has failed 10 times within a minute of its first failure, every request
+    from it is answered `429` until that minute is up, whatever key it sends.
+    Requests that authenticate are not limited.
+
+    ## Responses
+
+    Every JSON response is an envelope: `error` says whether the request
+    failed, `message` is meant for people, and `data`, on success, holds the
+    result. Clients should go by the status code, not the message.
+
+    Ingestion is asynchronous: a `202` means the event is queued durably,
+    not yet stored. It is readable once the listener has stored it, usually
+    within a moment. Delivery is at least once.
+
+    ## CORS
+
+    Browsers may call every route from any `http` or `https` origin.
+  contact:
+    name: Logwolf
+    url: https://github.com/logwolf-app/logwolf
+
+servers:
+  - url: '{origin}/api'
+    description: A Logwolf instance. Its Caddy serves the API under /api.
+    variables:
+      origin:
+        default: https://localhost
+        description: The instance's scheme and host.
+
+tags:
+  - name: Events
+    description: Sending, reading and deleting events. Each takes an API key.
+  - name: Health
+    description: Liveness and readiness checks. They take no credentials.
+
+paths:
+  /logs:
+    post:
+      tags: [Events]
+      operationId: createLog
+      summary: Send one event
+      description: |
+        Queues one event for the key's project. A `project_id` in the body is
+        ignored: the event belongs to the key's project.
+      security:
+        - apiKey: [ingest]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewEvent'
+      responses:
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '400':
+          description: |
+            The body is not one JSON object of the event's shape, is larger
+            than 1 MiB, or the severity is not one of the four.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/QueueUnavailable'
+
+    get:
+      tags: [Events]
+      operationId: listLogs
+      summary: List events
+      description: |
+        One page of the key's project's events, newest first. There is no
+        total count: a page shorter than `pageSize` is the last one.
+      security:
+        - apiKey: [read]
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: The page. Empty past the last event.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPage'
+        '400':
+          description: |
+            `page` or `pageSize` is not a whole number within its bounds, or
+            the logger refused the query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      tags: [Events]
+      operationId: deleteLog
+      summary: Delete an event
+      description: |
+        Deletes the event with the given id from the key's project. An id
+        that names no event of the project deletes nothing and still answers
+        `202`, with a count of 0.
+      security:
+        - apiKey: [delete]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteEvent'
+      responses:
+        '202':
+          description: Done. `data` says how many events were deleted, 0 or 1.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deleted'
+        '400':
+          description: The body is not one JSON object, or `id` is missing or not an event id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /logs/batch:
+    post:
+      tags: [Events]
+      operationId: createLogBatch
+      summary: Send several events
+      description: |
+        Queues up to 1000 events for the key's project. Every event is checked
+        before any is queued, so one bad event queues none. An empty array is
+        a `202` that queues nothing.
+
+        A batch that fails part-way (`503`) may have queued some of its
+        events; retrying it can store those twice.
+      security:
+        - apiKey: [ingest]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              maxItems: 1000
+              items:
+                $ref: '#/components/schemas/NewEvent'
+      responses:
+        '202':
+          $ref: '#/components/responses/Accepted'
+        '400':
+          description: |
+            The body is not a JSON array of events, is larger than 1 MiB, or
+            an event's severity is not one of the four (the message names the
+            event's index).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: The batch holds more than 1000 events.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/QueueUnavailable'
+
+  /logs/{id}:
+    get:
+      tags: [Events]
+      operationId: getLog
+      summary: Get an event
+      security:
+        - apiKey: [read]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The event's id.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The event.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: |
+            No event of the key's project has this id: it does not exist, it
+            belongs to another project, or the id is malformed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Readiness
+      description: |
+        Whether the instance can take and serve events now: RabbitMQ accepts
+        events, and the logger answers and has finished its startup tasks.
+      security: []
+      responses:
+        '200':
+          description: Every service is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: A service is down or degraded; `services` says which.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /ping:
+    get:
+      tags: [Health]
+      operationId: ping
+      summary: Liveness
+      description: Answers as long as the broker runs. Asks no other service.
+      security: []
+      responses:
+        '200':
+          description: The broker is running.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: .
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: lw_
+      description: |
+        A project API key, `lw_` and then random characters. The list of a
+        route's security requirement names the scope it demands.
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      description: The page to return, from 1.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000000
+        default: 1
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      description: How many events a page holds.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    Accepted:
+      description: The events are queued durably; RabbitMQ has confirmed every one.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Ok'
+    Unauthorized:
+      description: The `Authorization` header is missing, is not a Bearer token, or names no active key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: The key does not have the scope this route demands.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: This client address has failed to authenticate too often. Try again within a minute.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: The key could not be checked or the logger could not be reached. Safe to retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    QueueUnavailable:
+      description: RabbitMQ did not confirm the events. Nothing is stored for sure; retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Severity:
+      type: string
+      enum: [info, warning, error, critical]
+
+    NewEvent:
+      type: object
+      required: [severity]
+      properties:
+        name:
+          type: string
+          description: What happened, e.g. `checkout.completed`.
+        severity:
+          $ref: '#/components/schemas/Severity'
+          description: |
+            Also accepted in any case and with surrounding spaces: `ERROR` is
+            stored as `error`. Anything else is a `400`.
+        data:
+          type: string
+          description: Free-form. The SDK sends a JSON-encoded object, which the dashboard shows as JSON.
+        tags:
+          type: array
+          items:
+            type: string
+        duration:
+          type: integer
+          description: How long the operation took, in milliseconds.
+
+    Event:
+      type: object
+      required: [id, project_id, name, data, severity, tags, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        project_id:
+          type: string
+          description: The project of the key the event was sent with.
+        name:
+          type: string
+        data:
+          type: string
+        severity:
+          type: string
+          description: |
+            One of the four severities. Events stored before the broker began
+            normalizing severities keep the casing they were sent with.
+        tags:
+          type: [array, 'null']
+          description: '`null` when the event was sent without tags.'
+          items:
+            type: string
+        duration:
+          type: integer
+          description: In milliseconds. Left out when it was 0 or not sent.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DeleteEvent:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: The id of the event to delete.
+
+    Ok:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          const: false
+        message:
+          type: string
+
+    EventPage:
+      type: object
+      required: [error, message, data]
+      properties:
+        error:
+          const: false
+        message:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+
+    EventResult:
+      type: object
+      required: [error, message, data]
+      properties:
+        error:
+          const: false
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Event'
+
+    Deleted:
+      type: object
+      required: [error, message, data]
+      properties:
+        error:
+          const: false
+        message:
+          type: string
+        data:
+          type: string
+          description: '`Deleted entries: ` and the count.'
+          pattern: '^Deleted entries: [01]$'
+
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          const: true
+        message:
+          type: string
+          description: What went wrong, for people. Its wording may change.
+
+    Health:
+      type: object
+      required: [status, services]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+        services:
+          type: object
+          required: [rabbitmq, logger]
+          properties:
+            rabbitmq:
+              $ref: '#/components/schemas/ServiceStatus'
+            logger:
+              $ref: '#/components/schemas/ServiceStatus'
+
+    ServiceStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [up, down, degraded]
+          description: |
+            `degraded` is the logger serving while its startup tasks (the
+            startup migration and indexes) are failing and being retried.
+        error:
+          type: string
+          description: Why the service is not up.

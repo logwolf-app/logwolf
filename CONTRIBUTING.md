@@ -22,6 +22,7 @@ logwolf/
 ├── frontend/               # React Router v7 SSR dashboard (TypeScript)
 ├── docs/                   # Documentation site (VitePress)
 ├── scripts/                # Operational scripts (MongoDB upgrade)
+├── openapi.yaml            # Spec of the public API (checked by the broker's tests)
 ├── docker-compose.yml      # Full stack orchestration
 └── go.work                 # Go workspace
 ```

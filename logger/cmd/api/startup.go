@@ -65,8 +65,8 @@ func (app *Config) runStartupTasks() (bool, error) {
 }
 
 // ensureIndexes creates every index the logger relies on. Some are unique
-// constraints (the Default flag, memberships, settings), so a failure fails the
-// pass instead of being a warning.
+// constraints (the Default flag, memberships, settings, users), so a failure
+// fails the pass instead of being a warning.
 func (app *Config) ensureIndexes() error {
 	var errs []error
 	for _, ensure := range []struct {
@@ -77,6 +77,7 @@ func (app *Config) ensureIndexes() error {
 		{"logs", app.Models.EnsureLogsIndexes},
 		{"projects", app.Models.EnsureProjectIndexes},
 		{"api keys", app.Models.EnsureAPIKeyIndexes},
+		{"users", app.Models.EnsureUserIndexes},
 	} {
 		if err := ensure.fn(); err != nil {
 			log.Printf("Startup: FAILED to ensure %s indexes, will retry: %v", ensure.name, err)

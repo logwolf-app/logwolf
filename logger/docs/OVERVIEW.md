@@ -44,6 +44,15 @@ API keys live here too, so the Broker needs no database of its own:
 
 Replies never carry a key's bcrypt hash. `gob` sends every exported field whatever its `json` tag says, so the logger clears it first.
 
+Users are keyed by GitHub user ID, which survives a rename; the login is only what they were called at their last sign-in:
+
+| Method                 | Input               | Output            | Description                                                               |
+| ---------------------- | ------------------- | ----------------- | ------------------------------------------------------------------------- |
+| `RPCServer.UpsertUser` | `RPCUpsertUserArgs` | `User`            | Create the user with this GitHub ID, or refresh their login and email     |
+| `RPCServer.GetUser`    | `RPCGetUserArgs`    | `RPCGetUserReply` | Look a user up by GitHub ID; one who has never signed in is `Found` false |
+
+Both refuse a GitHub ID that is not positive with `data.ErrInvalidUser`.
+
 ## HTTP interface
 
 | Method | Path      | Description                                                                                          |

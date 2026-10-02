@@ -220,3 +220,29 @@ func TestGetLogs_RefusesAnOversizedPage(t *testing.T) {
 		t.Errorf("GetLogs with a page over the cap = %v, want ErrInvalidPagination", err)
 	}
 }
+
+// TestUserMethods_RefuseAnUnkeyedUser: users are keyed by GitHub user ID, so
+// both user methods refuse a call without one before any query. The zero-value
+// server has no database, so a call that got past the check would panic.
+func TestUserMethods_RefuseAnUnkeyedUser(t *testing.T) {
+	srv := &RPCServer{}
+
+	var user data.User
+	if err := srv.UpsertUser(&data.RPCUpsertUserArgs{GithubID: 0, GithubLogin: "jdoe"}, &user); !errors.Is(err, data.ErrInvalidUser) {
+		t.Errorf("UpsertUser without an id = %v, want ErrInvalidUser", err)
+	}
+	if err := srv.UpsertUser(&data.RPCUpsertUserArgs{GithubID: 42, GithubLogin: " "}, &user); !errors.Is(err, data.ErrInvalidUser) {
+		t.Errorf("UpsertUser without a login = %v, want ErrInvalidUser", err)
+	}
+	if user != (data.User{}) {
+		t.Errorf("reply should stay empty on error, got %+v", user)
+	}
+
+	var reply data.RPCGetUserReply
+	if err := srv.GetUser(&data.RPCGetUserArgs{GithubID: 0}, &reply); !errors.Is(err, data.ErrInvalidUser) {
+		t.Errorf("GetUser without an id = %v, want ErrInvalidUser", err)
+	}
+	if reply.Found {
+		t.Errorf("GetUser without an id should not find anyone, got %+v", reply)
+	}
+}

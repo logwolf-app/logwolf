@@ -82,6 +82,12 @@ GitHub logins are case-insensitive, so `project_members` stores them normalized 
 
 `ProjectExists` answers whether a project id names a project. Logger uses it to refuse events for deleted projects, and `DeleteOrphanedLogs` (in `models.go`) removes the ones that got through: logs whose `project_id` matches no project and that are older than a minute, so it never races a project being created. It skips logs with no or an empty `project_id`, which belong to the startup migration. A `project_id` still stored as a string is compared by its text, so a live project's logs that `ConvertProjectIDs` has not reached yet are never taken for orphans. It, `PurgeProjectLogs` and `DeleteExpiredLogs` all delete in batches of 10,000, each with its own 30s timeout, so a project with millions of logs is purged over as long as it takes rather than failing on one `DeleteMany`.
 
+### Users (`user.go`)
+
+A `User` is someone who has signed in, keyed by their GitHub user ID (`github_id`), which a unique index (`unique_github_id`, from `EnsureUserIndexes`) keeps to one user per account. Logins are not identities: GitHub lets people rename their account, and another account can then take the old name. So `github_login` is only the login the user had at their last sign-in, normalized like membership logins, for display and invites; after a rename two users can briefly share one.
+
+`UpsertUser(githubID, login, email)` records a sign-in: it creates the user, or refreshes the login and email of the existing one, and returns the user as stored. The `_id` and `created_at` never change. An empty email clears a stored one, since the user has made theirs private. Two simultaneous first sign-ins of one account leave one user: the unique index refuses the second insert, which retries as an update. It refuses (`ErrInvalidUser`) a user with no positive GitHub ID or no login. `GetUserByGithubID` returns `mongo.ErrNoDocuments`, wrapped, for someone who has never signed in. Logger exposes both over RPC (`RPCUpsertUserArgs`, `RPCGetUserArgs` → `RPCGetUserReply`).
+
 ### Startup migration (`migrate.go`)
 
 Adopts data written before projects existed. Logger calls it on every start; Broker and Listener never do.

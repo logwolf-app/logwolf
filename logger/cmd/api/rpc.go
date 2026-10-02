@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"logwolf-toolbox/data"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type RPCServer struct {
@@ -386,6 +388,44 @@ func (r *RPCServer) ListMembers(args *data.ProjectArgs, reply *[]data.ProjectMem
 		return err
 	}
 	*reply = members
+	return nil
+}
+
+// --- Users ---
+//
+// A user is keyed by their GitHub user ID, which survives a rename; the login
+// is only what they were called when they last signed in.
+
+// UpsertUser records a sign-in: it creates the user with this GitHub ID, or
+// refreshes the login and email of the existing one, and replies with the user
+// as stored.
+func (r *RPCServer) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) error {
+	log.Printf("Upserting user %d (%s)", args.GithubID, args.GithubLogin)
+	user, err := r.models.UpsertUser(args.GithubID, args.GithubLogin, args.Email)
+	if err != nil {
+		log.Println("Error upserting user:", err)
+		return err
+	}
+	*reply = *user
+	return nil
+}
+
+// GetUser looks a user up by GitHub user ID. One who has never signed in is not
+// an error: it is Found false.
+func (r *RPCServer) GetUser(args *data.RPCGetUserArgs, reply *data.RPCGetUserReply) error {
+	if args.GithubID <= 0 {
+		return fmt.Errorf("GetUser: %w: GitHub user ID must be positive, got %d", data.ErrInvalidUser, args.GithubID)
+	}
+	user, err := r.models.GetUserByGithubID(args.GithubID)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		*reply = data.RPCGetUserReply{}
+		return nil
+	}
+	if err != nil {
+		log.Println("Error getting user:", err)
+		return err
+	}
+	*reply = data.RPCGetUserReply{Found: true, User: *user}
 	return nil
 }
 

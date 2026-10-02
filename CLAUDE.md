@@ -125,10 +125,11 @@ RPC methods (Go stdlib `net/rpc`):
 - `RPCServer.GetLog` — fetch one event by id within a project
 - `RPCServer.DeleteLog` — delete by filter, returns count
 - `RPCServer.ValidateAPIKey`, `ListAPIKeys`, `CreateAPIKey`, `RevokeAPIKey` — API key storage for the broker; replies never carry the hash, and revoke matches the project as well as the id
+- `RPCServer.UpsertUser`, `GetUser` — the `users` collection, keyed by GitHub user ID (unique `github_id` index); the stored `github_login` is only the login at the last sign-in. An unknown user is `Found` false, not an error
 
 ### Toolbox (`toolbox/`)
 
-Packages: `data` (Models, LogEntry, APIKey, Settings), `event` (emitter + consumer), `limits` (`Provider`, the edition's limits), `rabbitmq` (connection), `json` (helpers).
+Packages: `data` (Models, LogEntry, APIKey, Settings, User), `event` (emitter + consumer), `limits` (`Provider`, the edition's limits), `rabbitmq` (connection), `json` (helpers).
 
 The `data.Models` struct is the sole database accessor passed between services.
 

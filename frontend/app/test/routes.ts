@@ -9,7 +9,7 @@ import type { IApi, Project, ProjectRole, UserProject } from '~/lib/api';
 import { commitSession, getSession } from '~/lib/session.server';
 import { sealToken } from '~/lib/token.server';
 
-export const user = { login: 'Octocat', name: 'The Octocat', avatarUrl: 'https://example.com/octocat.png' };
+export const user = { id: 583231, login: 'Octocat', name: 'The Octocat', avatarUrl: 'https://example.com/octocat.png' };
 export const CSRF = 'test-csrf-token';
 
 /** The route context: the event the dashboard reports itself with is absent. */
@@ -88,6 +88,7 @@ export function project(id: string, role: ProjectRole = 'owner', name = `Project
  */
 export function fakeApi(overrides: Partial<IApi> = {}): { [K in keyof IApi]: ReturnType<typeof vi.fn> } & IApi {
 	const methods: (keyof IApi)[] = [
+		'upsertCurrentUser',
 		'getProjects',
 		'createProject',
 		'updateProject',

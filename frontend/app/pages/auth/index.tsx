@@ -65,6 +65,15 @@ export default function Auth({ loaderData }: Route.ComponentProps) {
 							</Alert>
 						)}
 
+						{loaderData.error === 'unavailable' && (
+							<Alert variant='destructive'>
+								<CircleAlert />
+								<AlertTitle className='line-clamp-none'>
+									Logwolf could not sign you in. Try again in a moment.
+								</AlertTitle>
+							</Alert>
+						)}
+
 						<form method='post'>
 							<Button type='submit' size='lg' className='w-full bg-foreground text-background hover:bg-foreground/90'>
 								<GitHubMark className='size-4' />

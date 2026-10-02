@@ -42,10 +42,11 @@ Both log reads, `GET /logs` and the dashboard's `GET /projects/{id}/logs`, take 
 
 Not reachable from the internet: Caddy forwards only the public routes above and the health checks, and `caddy_test.go` fails if the `Caddyfile` would forward any of these, or stop forwarding a public one.
 
-Everything that acts on one project is under `/projects/{id}`.
+Everything that acts on one project is under `/projects/{id}`. `PUT /users/me` is the one route about the caller rather than a project.
 
 | Method   | Path                             | Access | Description                                          |
 | -------- | -------------------------------- | ------ | ---------------------------------------------------- |
+| `PUT`    | `/users/me`                      | —      | Record a sign-in (below)                             |
 | `GET`    | `/projects`                      | —      | Projects the caller belongs to, with `role`          |
 | `POST`   | `/projects`                      | —      | Create a project, owned by the caller                |
 | `GET`    | `/projects/{id}`                 | member | Get one project                                      |
@@ -69,6 +70,11 @@ Everything that acts on one project is under `/projects/{id}`.
 Internal routes also require `X-User-Login`; project access is checked against
 that login on every call. `requireUserLogin` lowercases it first, as memberships
 are stored: GitHub logins are case-insensitive.
+
+The dashboard calls `PUT /users/me` at each sign-in with `{"github_id": n, "email": "..."}`,
+and the broker hands it to `RPCServer.UpsertUser` with the caller's login. The user is keyed by
+the GitHub ID, so a renamed account stays the same user with its new login. A `github_id` that is
+missing or not a positive integer is a 400; the reply is the user as stored.
 
 Every route that acts on a project denies access the same way (`access.go`):
 

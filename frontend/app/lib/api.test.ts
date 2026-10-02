@@ -64,6 +64,13 @@ describe('Api', () => {
 			{ login: 'octodog', role: 'member' },
 		],
 		['deleteProject', () => api.deleteProject(project), 'DELETE', `projects/${project}`, undefined],
+		[
+			'upsertCurrentUser',
+			() => api.upsertCurrentUser(583231, 'octo@example.com'),
+			'PUT',
+			'users/me',
+			{ github_id: 583231, email: 'octo@example.com' },
+		],
 	] as const)('%s calls %s %s', async (_name, run, method, path, body) => {
 		answer(method === 'GET' && path.endsWith('keys') ? [] : {});
 		await run();

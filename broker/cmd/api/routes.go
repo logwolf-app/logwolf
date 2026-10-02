@@ -30,6 +30,8 @@ func (app *Config) routes() http.Handler {
 	mux.Group(func(r chi.Router) {
 		r.Use(app.requireInternalSecret)
 		r.Use(app.requireUserLogin)
+		// The dashboard records each sign-in here.
+		r.Put("/users/me", app.UpsertCurrentUser)
 		r.Get("/projects", app.ListProjects)
 		r.Post("/projects", app.CreateProject)
 

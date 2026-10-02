@@ -486,6 +486,44 @@ func (app *Config) CreateProject(w http.ResponseWriter, r *http.Request) {
 	app.writeJSON(w, http.StatusCreated, jsonResponse{Error: false, Message: "Project created.", Data: project})
 }
 
+// --- Users ---
+
+// UpsertCurrentUser records a sign-in. The dashboard calls it once GitHub has
+// said who the user is: the body carries their numeric GitHub ID, which survives
+// a rename, and their public email; the login is the caller's, from
+// X-User-Login. It creates the user or refreshes their login and email, and
+// answers the user as stored.
+func (app *Config) UpsertCurrentUser(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		GithubID int64  `json:"github_id"`
+		Email    string `json:"email"`
+	}
+	if err := app.readJSON(w, r, &body); err != nil {
+		app.errorJSON(w, err)
+		return
+	}
+
+	if body.GithubID <= 0 {
+		app.errorJSON(w, fmt.Errorf("github_id must be a positive integer"), http.StatusBadRequest)
+		return
+	}
+
+	client, ok := app.dialLogger(w)
+	if !ok {
+		return
+	}
+	defer client.Close()
+
+	var user data.User
+	args := data.RPCUpsertUserArgs{GithubID: body.GithubID, GithubLogin: userLoginFromContext(r), Email: body.Email}
+	if err := client.Call("RPCServer.UpsertUser", &args, &user); err != nil {
+		app.rpcErrorJSON(w, err, nil)
+		return
+	}
+
+	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Message: "User saved.", Data: user})
+}
+
 // The handlers from here on sit behind requireProject, which has checked the
 // caller's access to the project in the path (routes.go says to which level)
 // and hands them the project and an open logger connection.

@@ -4,6 +4,9 @@ import { unsealToken } from './token.server';
 
 type SessionData = {
 	githubUser: {
+		/** GitHub's numeric user ID, which a rename does not change. */
+		id: number;
+		/** The login, in GitHub's casing, for display. */
 		login: string;
 		name: string;
 		avatarUrl: string;

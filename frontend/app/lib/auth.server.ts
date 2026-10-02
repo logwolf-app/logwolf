@@ -1,5 +1,6 @@
 import { redirect } from 'react-router';
 
+import { createApi } from './api';
 import { commitSession, destroySession, getSession } from './session.server';
 import { signupPolicyFromEnv } from './signup.server';
 import { sealToken } from './token.server';
@@ -43,10 +44,23 @@ export async function handleGitHubCallback(code: string, request: Request) {
 	}
 	if (!allowed) throw redirect('/auth?error=unauthorized');
 
+	// Record the sign-in: the user is keyed by their GitHub ID, so a rename
+	// refreshes their stored login without making them someone else. Who may sign
+	// in is still decided by login, above. A sign-in that cannot be recorded does
+	// not go through.
+	try {
+		await createApi(user.login).upsertCurrentUser(user.id, typeof user.email === 'string' ? user.email : '');
+	} catch (err) {
+		console.error('Could not record the sign-in', err);
+		throw redirect('/auth?error=unavailable');
+	}
+
 	// Set session. The login keeps GitHub's casing for display; the broker
-	// normalizes it before matching memberships.
+	// normalizes it before matching memberships. The ID is GitHub's, which a
+	// rename does not change.
 	const session = await getSession(request.headers.get('Cookie'));
 	session.set('githubUser', {
+		id: user.id,
 		login: user.login,
 		name: user.name,
 		avatarUrl: user.avatar_url,
@@ -64,7 +78,9 @@ export async function handleGitHubCallback(code: string, request: Request) {
 export async function requireAuth(request: Request) {
 	const session = await getSession(request.headers.get('Cookie'));
 	const user = session.get('githubUser');
-	if (!user) throw redirect('/auth');
+	// A session from before sign-in kept the user's ID has none: signing in
+	// again records the user and adds it.
+	if (!user || typeof user.id !== 'number') throw redirect('/auth');
 	return user;
 }
 

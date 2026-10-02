@@ -118,6 +118,7 @@ func TestInternalRoutes_RejectMissingOrWrongSecret(t *testing.T) {
 		{http.MethodGet, "/projects/" + projAlpha + "/retention"},
 		{http.MethodGet, "/projects/" + projAlpha + "/metrics"},
 		{http.MethodGet, "/projects"},
+		{http.MethodPut, "/users/me"},
 		{http.MethodGet, "/projects/" + projAlpha},
 		{http.MethodDelete, "/projects/" + projAlpha},
 		{http.MethodGet, "/projects/" + projAlpha + "/members"},

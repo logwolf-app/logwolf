@@ -144,13 +144,19 @@ rate-limited: that never blocks an owner.
    sign in, and the server logs an error at startup. Both lists are parsed like the logger's
    `ParseGithubLogins` (trimmed, lowercased, blanks and duplicates dropped), and a failed org lookup
    denies the sign-in.
-3. A session cookie is issued for subsequent requests (React Router's cookie session: signed with
+3. The sign-in is recorded with the broker (`PUT /users/me`): the user is upserted by their numeric
+   GitHub ID, which a rename does not change, and their stored login and public email are refreshed.
+   If it cannot be recorded, the sign-in fails (`/auth?error=unavailable`). Who may sign in is still
+   decided by login, above, so self-hosted configuration is unchanged.
+4. A session cookie is issued for subsequent requests (React Router's cookie session: signed with
    `SESSION_SECRET`, not encrypted, so readable by whoever holds it). It keeps the user's GitHub
    OAuth token too, for the invite check, **sealed** with AES-256-GCM under a key derived from
    `SESSION_SECRET` (`lib/token.server.ts`). The token carries the scopes sign-in asks for,
    `read:user read:org`, and goes nowhere but `api.github.com`. Changing `SESSION_SECRET` signs
-   everyone out and makes old tokens unreadable.
-4. All protected routes validate the session server-side before rendering.
+   everyone out and makes old tokens unreadable. The session's `githubUser` carries the GitHub user
+   ID (`id`) next to the login, which keeps GitHub's casing for display.
+5. All protected routes validate the session server-side before rendering (`requireAuth`). A session
+   from before the ID was kept has none, and is sent back to sign in, which records the user.
 
 CSRF tokens are required on all mutating form submissions.
 

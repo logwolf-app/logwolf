@@ -34,6 +34,7 @@ type fakeLogger struct {
 	metrics   map[string]data.Metrics         // project id hex -> metrics
 	keys      map[string]data.APIKey          // key id hex -> key
 	plaintext map[string]string               // plaintext key -> key id hex
+	users     map[int64]data.User             // GitHub user ID -> user
 
 	// Recorded calls, for asserting what the broker forwarded.
 	getLogsParams   []data.QueryParams
@@ -46,6 +47,7 @@ type fakeLogger struct {
 	removedMembers  []data.RPCRemoveMemberArgs
 	roleChanges     []data.RPCUpdateMemberRoleArgs
 	revokedKeys     []data.RPCRevokeAPIKeyArgs
+	upsertedUsers   []data.RPCUpsertUserArgs
 	accessChecks    int // ProjectAccess calls
 
 	// Failure injection.
@@ -86,6 +88,7 @@ func newFakeLogger() *fakeLogger {
 		metrics:   map[string]data.Metrics{},
 		keys:      map[string]data.APIKey{},
 		plaintext: map[string]string{},
+		users:     map[int64]data.User{},
 	}
 }
 
@@ -415,6 +418,27 @@ func (f *fakeLogger) RevokeAPIKey(args *data.RPCRevokeAPIKeyArgs, reply *string)
 	k.Active = false
 	f.keys[args.ID] = k
 	*reply = "ok"
+	return nil
+}
+
+// UpsertUser keys users by GitHub ID like the logger: a second sign-in keeps
+// the user and refreshes their login and email.
+func (f *fakeLogger) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.upsertedUsers = append(f.upsertedUsers, *args)
+	login := data.NormalizeGithubLogin(args.GithubLogin)
+	if args.GithubID <= 0 || login == "" {
+		return fmt.Errorf("UpsertUser: %w", data.ErrInvalidUser)
+	}
+	u, ok := f.users[args.GithubID]
+	if !ok {
+		u = data.User{ID: primitive.NewObjectID(), GithubID: args.GithubID}
+	}
+	u.GithubLogin, u.Email = login, args.Email
+	f.users[args.GithubID] = u
+	*reply = u
 	return nil
 }
 

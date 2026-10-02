@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"net/rpc"
 	"sync"
 	"testing"
@@ -222,5 +224,38 @@ func TestUserRPC(t *testing.T) {
 	}
 	if !unique {
 		t.Errorf("logger did not create the unique github_id index; indexes: %+v", indexes)
+	}
+}
+
+// TestSignInThroughBroker records sign-ins the way the dashboard does, through
+// the broker's PUT /users/me: a rename is the same user under the new login.
+func TestSignInThroughBroker(t *testing.T) {
+	stack := sharedStack(t)
+
+	// The stack's database is shared, so the id is one no other test uses.
+	githubID := time.Now().UnixNano()
+
+	var first data.User
+	raw := mustInternalCall(t, stack.brokerURL, http.MethodPut, "/users/me", "Broker-User",
+		map[string]any{"github_id": githubID, "email": "broker@example.com"}, http.StatusOK)
+	if err := json.Unmarshal(raw, &first); err != nil {
+		t.Fatalf("decode first sign-in: %v", err)
+	}
+	if first.ID.IsZero() || first.GithubID != githubID || first.GithubLogin != "broker-user" || first.Email != "broker@example.com" {
+		t.Errorf("first sign-in: got %+v", first)
+	}
+
+	var renamed data.User
+	raw = mustInternalCall(t, stack.brokerURL, http.MethodPut, "/users/me", "Broker-User-Renamed",
+		map[string]any{"github_id": githubID}, http.StatusOK)
+	if err := json.Unmarshal(raw, &renamed); err != nil {
+		t.Fatalf("decode sign-in after rename: %v", err)
+	}
+	if renamed.ID != first.ID || renamed.GithubLogin != "broker-user-renamed" || renamed.Email != "" {
+		t.Errorf("sign-in after rename: got %+v, want user %s with the new login and no email", renamed, first.ID.Hex())
+	}
+
+	if status, _ := internalCall(t, stack.brokerURL, http.MethodPut, "/users/me", "broker-user", map[string]any{}); status != http.StatusBadRequest {
+		t.Errorf("sign-in without a GitHub ID = %d, want 400", status)
 	}
 }

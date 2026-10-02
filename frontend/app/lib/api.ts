@@ -59,6 +59,18 @@ export type ProjectMember = {
  */
 export type Retention = { days: number; choices: number[] };
 
+/**
+ * A dashboard user as the broker stores them, keyed by their GitHub user ID;
+ * `github_login` is the login at their last sign-in, lowercased.
+ */
+export type User = {
+	id: string;
+	github_id: number;
+	github_login: string;
+	email: string;
+	created_at: string;
+};
+
 export type Metrics = {
 	total_events: number;
 	total_errors: number;
@@ -70,6 +82,8 @@ export type Metrics = {
 };
 
 export interface IApi {
+	/** Records a sign-in of the signed-in login, with their GitHub user ID and public email. */
+	upsertCurrentUser(githubId: number, email: string): Promise<User>;
 	getProjects(): Promise<UserProject[]>;
 	createProject(name: string, slug: string): Promise<Project>;
 	updateProject(id: string, name: string): Promise<Project>;
@@ -103,6 +117,18 @@ export class Api implements IApi {
 			'X-User-Login': this.userLogin,
 			...extra,
 		};
+	}
+
+	public async upsertCurrentUser(githubId: number, email: string): Promise<User> {
+		const res = await fetch(`${this.baseUrl}users/me`, {
+			method: 'PUT',
+			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
+			body: JSON.stringify({ github_id: githubId, email }),
+		});
+		const json = (await res.json()) as ApiResponse<User>;
+		if (json.error) throw new Error(json.message);
+
+		return json.data;
 	}
 
 	public async getProjects(): Promise<UserProject[]> {

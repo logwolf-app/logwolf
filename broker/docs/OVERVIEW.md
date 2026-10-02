@@ -44,37 +44,52 @@ Not reachable from the internet: Caddy forwards only the public routes above and
 
 Everything that acts on one project is under `/projects/{id}`. `PUT /users/me` is the one route about the caller rather than a project.
 
-| Method   | Path                             | Access | Description                                          |
-| -------- | -------------------------------- | ------ | ---------------------------------------------------- |
-| `PUT`    | `/users/me`                      | —      | Record a sign-in (below)                             |
-| `GET`    | `/projects`                      | —      | Projects the caller belongs to, with `role`          |
-| `POST`   | `/projects`                      | —      | Create a project, owned by the caller                |
-| `GET`    | `/projects/{id}`                 | member | Get one project                                      |
-| `PATCH`  | `/projects/{id}`                 | owner  | Rename a project (the slug stays)                    |
-| `DELETE` | `/projects/{id}`                 | owner  | Delete a project and everything under it             |
-| `GET`    | `/projects/{id}/members`         | member | List members                                         |
-| `POST`   | `/projects/{id}/members`         | owner  | Add a member                                         |
-| `PATCH`  | `/projects/{id}/members/{login}` | owner  | Change a member's `role` (owner or member)           |
-| `DELETE` | `/projects/{id}/members/{login}` | owner  | Remove a member                                      |
-| `GET`    | `/projects/{id}/logs`            | member | List a project's events (paginated)                  |
-| `POST`   | `/projects/{id}/logs`            | member | Submit an event to a project (async, 202)            |
-| `GET`    | `/projects/{id}/logs/{logID}`    | member | Get one event                                        |
-| `DELETE` | `/projects/{id}/logs/{logID}`    | member | Delete one event                                     |
-| `GET`    | `/projects/{id}/keys`            | member | List API keys                                        |
-| `POST`   | `/projects/{id}/keys`            | member | Create an API key; `scopes` default: ingest          |
-| `DELETE` | `/projects/{id}/keys/{keyID}`    | member | Revoke an API key; another project's is a 404        |
-| `GET`    | `/projects/{id}/retention`       | member | Get retention (`{"days": n, "choices": [...]}`)      |
-| `PATCH`  | `/projects/{id}/retention`       | member | Update retention; lowering it is owner-only (below)  |
-| `GET`    | `/projects/{id}/metrics`         | member | Usage analytics                                      |
+| Method   | Path                                | Access | Description                                                 |
+| -------- | ----------------------------------- | ------ | ----------------------------------------------------------- |
+| `PUT`    | `/users/me`                         | —      | Record a sign-in (below)                                    |
+| `GET`    | `/projects`                         | —      | Projects the caller belongs to, with `role`                 |
+| `POST`   | `/projects`                         | —      | Create a project, owned by the caller                       |
+| `GET`    | `/projects/{id}`                    | member | Get one project                                             |
+| `PATCH`  | `/projects/{id}`                    | owner  | Rename a project (the slug stays)                           |
+| `DELETE` | `/projects/{id}`                    | owner  | Delete a project and everything under it                    |
+| `GET`    | `/projects/{id}/members`            | member | List members                                                |
+| `POST`   | `/projects/{id}/members`            | owner  | Add a member: `{"login", "user_id", "role"}` (below)        |
+| `PATCH`  | `/projects/{id}/members/{memberID}` | owner  | Change a member's `role` (owner or member)                  |
+| `DELETE` | `/projects/{id}/members/{memberID}` | owner  | Remove a member                                             |
+| `GET`    | `/projects/{id}/logs`               | member | List a project's events (paginated)                         |
+| `POST`   | `/projects/{id}/logs`               | member | Submit an event to a project (async, 202)                   |
+| `GET`    | `/projects/{id}/logs/{logID}`       | member | Get one event                                               |
+| `DELETE` | `/projects/{id}/logs/{logID}`       | member | Delete one event                                            |
+| `GET`    | `/projects/{id}/keys`               | member | List API keys                                               |
+| `POST`   | `/projects/{id}/keys`               | member | Create an API key; `scopes` default: ingest                 |
+| `DELETE` | `/projects/{id}/keys/{keyID}`       | member | Revoke an API key; another project's is a 404               |
+| `GET`    | `/projects/{id}/retention`          | member | Get retention (`{"days": n, "choices": [...]}`)             |
+| `PATCH`  | `/projects/{id}/retention`          | member | Update retention; lowering it is owner-only (below)         |
+| `GET`    | `/projects/{id}/metrics`            | member | Usage analytics                                             |
 
-Internal routes also require `X-User-Login`; project access is checked against
-that login on every call. `requireUserLogin` lowercases it first, as memberships
-are stored: GitHub logins are case-insensitive.
+Internal routes also require the signed-in user: `X-User-ID`, their GitHub user
+ID, and `X-User-Login`, their login (401 without either, or with an ID that is
+not a positive integer). `requireUserLogin` stores both, the login lowercased:
+GitHub logins are case-insensitive. Project access is checked against the user
+ID on every call, so a member who renames their GitHub account keeps their
+access, and whoever takes the old login gets none of it. The login only finds
+memberships stored before user IDs, which carry none (`data.MemberFilter`);
+a membership linked to a user ID is never matched by login.
 
-The dashboard calls `PUT /users/me` at each sign-in with `{"github_id": n, "email": "..."}`,
-and the broker hands it to `RPCServer.UpsertUser` with the caller's login. The user is keyed by
-the GitHub ID, so a renamed account stays the same user with its new login. A `github_id` that is
-missing or not a positive integer is a 400; the reply is the user as stored.
+A membership belongs to a user ID. Invites still name a login: the dashboard
+resolves it to the GitHub user ID through GitHub's API before it calls `POST
+/projects/{id}/members`, which takes both, and refuses a `user_id` that is
+missing or not a positive integer with a 400. Adding a user who is already a
+member, under any login, is a 409. The member listing returns each membership's
+own `id`, which is what `PATCH` and `DELETE` take as `{memberID}`: it names one
+row whether or not it is linked to a user yet, and another project's is a 404.
+`user_id` comes with each member that has one, and a member who has signed in
+is listed under the login of their last sign-in.
+
+The dashboard calls `PUT /users/me` at each sign-in with `{"email": "..."}`, and the broker hands
+it to `RPCServer.UpsertUser` with the caller's GitHub ID and login from the headers. The user is
+keyed by the GitHub ID, so a renamed account stays the same user with its new login. The reply is
+the user as stored.
 
 Every route that acts on a project denies access the same way (`access.go`):
 

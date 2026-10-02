@@ -30,7 +30,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 
 	// An event of another project is a 404 here, and a 404 reads the same as any
 	// other failure: there is nothing to show, so fall back to the list.
-	const log = await createApi(user.login)
+	const log = await createApi(user)
 		.getLog(projectId, params.id)
 		.catch((err: unknown) => {
 			event?.setSeverity('error');

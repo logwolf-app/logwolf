@@ -30,7 +30,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	// A broker that refuses the read must not take the whole page down, so it
 	// surfaces as an alert above an empty table.
 	try {
-		const events = await createApi(user.login).getLogs(projectId, { page: 1, pageSize: 20 });
+		const events = await createApi(user).getLogs(projectId, { page: 1, pageSize: 20 });
 		event?.set('loaderData', ['too much data']);
 
 		return { events, noProject: false, error: null };
@@ -60,7 +60,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 		const id = fd.get('id')?.toString() ?? '';
 
 		try {
-			await createApi(user.login).deleteLog(projectId, id);
+			await createApi(user).deleteLog(projectId, id);
 			event?.set('actionData', { deleted: id });
 
 			return { deleted: id };

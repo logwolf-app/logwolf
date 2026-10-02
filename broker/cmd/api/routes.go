@@ -15,7 +15,7 @@ func (app *Config) routes() http.Handler {
 	mux.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"https://*", "http://*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Internal-Secret", "X-User-Login"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Internal-Secret", "X-User-ID", "X-User-Login"},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -25,8 +25,9 @@ func (app *Config) routes() http.Handler {
 
 	mux.Get("/health", app.Health)
 
-	// Dashboard routes — the internal secret and a user login, no API key.
-	// Everything that acts on one project is under /projects/{id}.
+	// Dashboard routes — the internal secret and the signed-in user (GitHub user
+	// ID and login), no API key. Everything that acts on one project is under
+	// /projects/{id}; a member is named by their membership's id.
 	mux.Group(func(r chi.Router) {
 		r.Use(app.requireInternalSecret)
 		r.Use(app.requireUserLogin)
@@ -43,8 +44,8 @@ func (app *Config) routes() http.Handler {
 		r.With(owner).Delete("/projects/{id}", app.DeleteProject)
 		r.With(member).Get("/projects/{id}/members", app.ListProjectMembers)
 		r.With(owner).Post("/projects/{id}/members", app.AddProjectMember)
-		r.With(owner).Patch("/projects/{id}/members/{login}", app.UpdateProjectMemberRole)
-		r.With(owner).Delete("/projects/{id}/members/{login}", app.RemoveProjectMember)
+		r.With(owner).Patch("/projects/{id}/members/{memberID}", app.UpdateProjectMemberRole)
+		r.With(owner).Delete("/projects/{id}/members/{memberID}", app.RemoveProjectMember)
 		r.With(member).Get("/projects/{id}/logs", app.ListProjectLogs)
 		r.With(member).Post("/projects/{id}/logs", app.CreateProjectLog)
 		r.With(member).Get("/projects/{id}/logs/{logID}", app.GetProjectLog)

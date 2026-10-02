@@ -2,17 +2,30 @@ package main
 
 import (
 	"net/http"
+	"strconv"
 	"testing"
 
 	"logwolf-toolbox/data"
 )
 
-// TestUpsertCurrentUser_RecordsTheSignIn: the dashboard sends the GitHub ID and
-// email, the login comes from X-User-Login, and the user comes back as stored.
+// signInRequest is the dashboard's PUT /users/me as the user with this login
+// and GitHub user ID; an id of 0 leaves X-User-ID out.
+func signInRequest(login string, githubID int64, body any) *http.Request {
+	r := internalRequest(http.MethodPut, "/users/me", login, body)
+	r.Header.Del("X-User-ID")
+	if githubID != 0 {
+		r.Header.Set("X-User-ID", strconv.FormatInt(githubID, 10))
+	}
+	return r
+}
+
+// TestUpsertCurrentUser_RecordsTheSignIn: the GitHub ID and login come from
+// X-User-ID and X-User-Login, the email from the body, and the user comes back
+// as stored.
 func TestUpsertCurrentUser_RecordsTheSignIn(t *testing.T) {
 	h, f := newInternalTestServer(t)
 
-	w := do(h, internalRequest(http.MethodPut, "/users/me", "Octocat", map[string]any{"github_id": 583231, "email": "octo@example.com"}))
+	w := do(h, signInRequest("Octocat", 583231, map[string]any{"email": "octo@example.com"}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT /users/me = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
@@ -34,8 +47,8 @@ func TestUpsertCurrentUser_RecordsTheSignIn(t *testing.T) {
 func TestUpsertCurrentUser_FollowsARename(t *testing.T) {
 	h, _ := newInternalTestServer(t)
 
-	first := decodeData[data.User](t, do(h, internalRequest(http.MethodPut, "/users/me", "octocat", map[string]any{"github_id": 583231})))
-	w := do(h, internalRequest(http.MethodPut, "/users/me", "octocat-renamed", map[string]any{"github_id": 583231}))
+	first := decodeData[data.User](t, do(h, signInRequest("octocat", 583231, map[string]any{})))
+	w := do(h, signInRequest("octocat-renamed", 583231, map[string]any{}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT /users/me after a rename = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
@@ -46,31 +59,17 @@ func TestUpsertCurrentUser_FollowsARename(t *testing.T) {
 	}
 }
 
-// TestUpsertCurrentUser_RefusesAUserWithoutAGithubID: a user is keyed by GitHub
-// ID, so the broker refuses one without a usable ID before calling the logger.
-func TestUpsertCurrentUser_RefusesAUserWithoutAGithubID(t *testing.T) {
+// TestUpsertCurrentUser_TakesTheIDFromTheHeader: like every dashboard route, it
+// takes who the caller is from X-User-ID and X-User-Login. Without a usable ID
+// it is refused before the logger; an ID in the body names nobody.
+func TestUpsertCurrentUser_TakesTheIDFromTheHeader(t *testing.T) {
 	h, f := newInternalTestServer(t)
 
-	for _, body := range []map[string]any{{}, {"github_id": 0}, {"github_id": -1}, {"email": "octo@example.com"}} {
-		if w := do(h, internalRequest(http.MethodPut, "/users/me", "octocat", body)); w.Code != http.StatusBadRequest {
-			t.Errorf("PUT /users/me with %v = %d, want 400", body, w.Code)
+	for _, id := range []int64{0, -1} {
+		if w := do(h, signInRequest("octocat", id, map[string]any{"github_id": 583231})); w.Code != http.StatusUnauthorized {
+			t.Errorf("PUT /users/me with X-User-ID %d = %d, want 401", id, w.Code)
 		}
 	}
-	if w := do(h, internalRequest(http.MethodPut, "/users/me", "octocat", map[string]any{"github_id": "583231"})); w.Code != http.StatusBadRequest {
-		t.Errorf("PUT /users/me with a string id = %d, want 400", w.Code)
-	}
-	f.snapshot(func(f *fakeLogger) {
-		if len(f.upsertedUsers) != 0 {
-			t.Errorf("forwarded %+v, want no logger call", f.upsertedUsers)
-		}
-	})
-}
-
-// TestUpsertCurrentUser_NeedsASignedInLogin: like every dashboard route, it
-// takes the login from X-User-Login, never from the body.
-func TestUpsertCurrentUser_NeedsASignedInLogin(t *testing.T) {
-	h, f := newInternalTestServer(t)
-
 	w := do(h, internalRequest(http.MethodPut, "/users/me", "", map[string]any{"github_id": 583231, "login": "octocat"}))
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("PUT /users/me without X-User-Login = %d, want 401", w.Code)
@@ -80,4 +79,9 @@ func TestUpsertCurrentUser_NeedsASignedInLogin(t *testing.T) {
 			t.Errorf("forwarded %+v, want no logger call", f.upsertedUsers)
 		}
 	})
+
+	w = do(h, signInRequest("octocat", 583231, map[string]any{"github_id": 1}))
+	if user := decodeData[data.User](t, w); w.Code != http.StatusOK || user.GithubID != 583231 {
+		t.Errorf("PUT /users/me with another ID in the body = %d, user %+v; want 200 for 583231", w.Code, user)
+	}
 }

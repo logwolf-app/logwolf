@@ -16,7 +16,7 @@ import type { ProjectMember } from '~/lib/api';
 import { type SettingsActionResult, useSuccessToast } from '../action-result';
 import { SettingsRow } from './settings-row';
 
-type Props = { members: ProjectMember[]; currentUser: string; canManage: boolean };
+type Props = { members: ProjectMember[]; currentUser: { id: number; login: string }; canManage: boolean };
 
 export function MembersSection({ members, currentUser, canManage }: Props) {
 	const csrfToken = useCsrfToken();
@@ -43,15 +43,18 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 	// removed nor demoted. The broker refuses both too; this only saves the
 	// round trip.
 	const ownerCount = members.filter((m) => m.role === 'owner').length;
-	const removing = removeFetcher.formData?.get('login')?.toString();
+	const removing = removeFetcher.formData?.get('member')?.toString();
 
 	// While a role change is in flight, show the role it asked for rather than
 	// snapping back to the old one until the table revalidates.
-	const changingRole = roleFetcher.formData?.get('login')?.toString();
+	const changingRole = roleFetcher.formData?.get('member')?.toString();
 	const pendingRole = roleFetcher.formData?.get('role')?.toString();
 
-	function changeRole(login: string, role: string) {
-		roleFetcher.submit({ _csrf: csrfToken, intent: 'change-role', login, role }, { method: 'post' });
+	function changeRole(member: ProjectMember, role: string) {
+		roleFetcher.submit(
+			{ _csrf: csrfToken, intent: 'change-role', member: member.id, login: member.github_login, role },
+			{ method: 'post' },
+		);
 	}
 
 	const error = addFetcher.data?.error ?? roleFetcher.data?.error ?? removeFetcher.data?.error;
@@ -104,16 +107,16 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 													{member.github_login.slice(0, 2)}
 												</span>
 												<span className='font-medium'>{member.github_login}</span>
-												{member.github_login === currentUser.toLowerCase() && <Badge variant='outline'>you</Badge>}
+												{isCurrentUser(member, currentUser) && <Badge variant='outline'>you</Badge>}
 											</div>
 										</TableCell>
 
 										<TableCell>
 											{canManage && !isLastOwner ? (
 												<Select
-													value={changingRole === member.github_login ? pendingRole : member.role}
-													onValueChange={(role) => changeRole(member.github_login, role)}
-													disabled={changingRole === member.github_login}
+													value={changingRole === member.id ? pendingRole : member.role}
+													onValueChange={(role) => changeRole(member, role)}
+													disabled={changingRole === member.id}
 												>
 													<SelectTrigger size='sm' className='w-28' aria-label={`Role of ${member.github_login}`}>
 														<SelectValue />
@@ -141,6 +144,7 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 													<removeFetcher.Form method='post'>
 														<input type='hidden' name='_csrf' value={csrfToken} />
 														<input type='hidden' name='intent' value='remove-member' />
+														<input type='hidden' name='member' value={member.id} />
 														<input type='hidden' name='login' value={member.github_login} />
 
 														<Button
@@ -148,7 +152,7 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 															variant='ghost'
 															size='icon-sm'
 															aria-label={`Remove ${member.github_login}`}
-															disabled={removing === member.github_login}
+															disabled={removing === member.id}
 														>
 															<Trash2 />
 														</Button>
@@ -205,4 +209,13 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 			</div>
 		</SettingsRow>
 	);
+}
+
+/**
+ * Whether the membership is the signed-in user's: by user ID, or, for one
+ * stored before user IDs, by login, the way the broker matches it.
+ */
+function isCurrentUser(member: ProjectMember, user: { id: number; login: string }) {
+	if (member.user_id) return member.user_id === user.id;
+	return member.github_login === user.login.toLowerCase();
 }

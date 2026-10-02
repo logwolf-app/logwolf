@@ -138,7 +138,7 @@ describe('checkInvitee', () => {
 	// way the real API did when asked: 204 or 404 to a member's token, 302 to a
 	// token from outside the org, 401 to a bad one.
 	function github(
-		users: Record<string, { login: string; type?: string }>,
+		users: Record<string, { id?: number; login: string; type?: string }>,
 		publicMembers: Record<string, string[]> = {},
 		allMembers: Record<string, string[]> = {},
 		tokens: Record<string, string> = {}, // token -> login it belongs to
@@ -171,7 +171,7 @@ describe('checkInvitee', () => {
 		}) as unknown as typeof fetch;
 	}
 
-	const octocat = { octocat: { login: 'Octocat' } };
+	const octocat = { octocat: { id: 583231, login: 'Octocat' } };
 
 	it('refuses a login GitHub does not know', async () => {
 		const check = await checkInvitee(
@@ -197,7 +197,7 @@ describe('checkInvitee', () => {
 			allowlistFromEnv({ LOGWOLF_ALLOWED_GITHUB_USERS: 'octocat' }),
 			github(octocat),
 		);
-		expect(check).toEqual({ kind: 'allowed', login: 'Octocat' });
+		expect(check).toEqual({ kind: 'allowed', id: 583231, login: 'Octocat' });
 		expect(inviteWarning(check)).toBeUndefined();
 	});
 
@@ -208,7 +208,7 @@ describe('checkInvitee', () => {
 			allowlistFromEnv({ LOGWOLF_ALLOWED_GITHUB_ORGS: 'other,acme' }),
 			fetchImpl,
 		);
-		expect(check).toEqual({ kind: 'allowed', login: 'Octocat' });
+		expect(check).toEqual({ kind: 'allowed', id: 583231, login: 'Octocat' });
 	});
 
 	it('warns about a user nothing clears, and says whether an org still might', async () => {
@@ -219,6 +219,7 @@ describe('checkInvitee', () => {
 		);
 		expect(usersOnly).toEqual({
 			kind: 'not-allowlisted',
+			id: 583231,
 			login: 'Octocat',
 			orgsAllowlisted: false,
 			privateChecked: true,
@@ -232,6 +233,7 @@ describe('checkInvitee', () => {
 		);
 		expect(withOrgs).toEqual({
 			kind: 'not-allowlisted',
+			id: 583231,
 			login: 'Octocat',
 			orgsAllowlisted: true,
 			privateChecked: false,
@@ -253,6 +255,7 @@ describe('checkInvitee', () => {
 			});
 			expect(await checkInvitee('octocat', allowlistFromEnv(acme), fetchImpl, 'alice-token')).toEqual({
 				kind: 'allowed',
+				id: 583231,
 				login: 'Octocat',
 			});
 		});
@@ -261,11 +264,17 @@ describe('checkInvitee', () => {
 			const check = await checkInvitee(
 				'octodog',
 				allowlistFromEnv(acme),
-				github({ octodog: { login: 'OctoDog' } }, {}, members, tokens),
+				github({ octodog: { id: 9001, login: 'OctoDog' } }, {}, members, tokens),
 				'alice-token',
 			);
 
-			expect(check).toEqual({ kind: 'not-allowlisted', login: 'OctoDog', orgsAllowlisted: true, privateChecked: true });
+			expect(check).toEqual({
+				kind: 'not-allowlisted',
+				id: 9001,
+				login: 'OctoDog',
+				orgsAllowlisted: true,
+				privateChecked: true,
+			});
 			expect(inviteWarning(check)).toMatch(/cannot sign in until/);
 			expect(inviteWarning(check)).not.toMatch(/privately/);
 		});
@@ -276,6 +285,7 @@ describe('checkInvitee', () => {
 			const publicOnly = github(octocat, { acme: ['Octocat'] }, members, tokens);
 			expect(await checkInvitee('octocat', allowlistFromEnv(acme), publicOnly, token)).toEqual({
 				kind: 'allowed',
+				id: 583231,
 				login: 'Octocat',
 			});
 
@@ -309,6 +319,32 @@ describe('checkInvitee', () => {
 			kind: 'unverified',
 			login: 'octocat',
 		});
+	});
+
+	// The membership belongs to the GitHub user ID, so the check hands it back
+	// whenever GitHub's user lookup answered, even if the org check then failed.
+	it('keeps the user ID GitHub answers the lookup with', async () => {
+		const orgDown = vi.fn(async (input: RequestInfo | URL) =>
+			new URL(String(input)).pathname === '/users/octocat'
+				? Response.json({ id: 583231, login: 'Octocat', type: 'User' })
+				: new Response(null, { status: 502 }),
+		) as unknown as typeof fetch;
+		expect(await checkInvitee('octocat', allowlistFromEnv({ LOGWOLF_ALLOWED_GITHUB_ORGS: 'acme' }), orgDown)).toEqual({
+			kind: 'unverified',
+			id: 583231,
+			login: 'Octocat',
+		});
+
+		// A lookup without a usable ID names nobody to add.
+		for (const id of [undefined, 0, -1, 1.5, '583231']) {
+			const noID = vi.fn(async () => Response.json({ id, login: 'Octocat', type: 'User' })) as unknown as typeof fetch;
+			expect(
+				await checkInvitee('octocat', allowlistFromEnv({ LOGWOLF_ALLOWED_GITHUB_USERS: 'octocat' }), noID),
+			).toEqual({
+				kind: 'unverified',
+				login: 'Octocat',
+			});
+		}
 	});
 
 	it('keeps a hand-crafted login from reshaping the GitHub path', async () => {

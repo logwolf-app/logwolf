@@ -44,14 +44,28 @@ export type ProjectRole = 'owner' | 'member';
 /** A project together with the role the requesting user holds in it. */
 export type UserProject = Project & { role: ProjectRole };
 
-/** A row of the project_members collection, as returned by the broker. */
+/**
+ * A row of the project_members collection, as returned by the broker. `id` is
+ * the membership's own, which the member routes take. `user_id` is the member's
+ * GitHub user ID, who the membership belongs to; memberships stored before user
+ * IDs have none, and are matched by `github_login` until they are linked.
+ * `github_login` is for display: the login at the member's last sign-in, or the
+ * one they were added under.
+ */
 export type ProjectMember = {
 	id: string;
 	project_id: string;
+	user_id?: number;
 	github_login: string;
 	role: ProjectRole;
 	created_at: string;
 };
+
+/** The signed-in user the broker acts for: their GitHub user ID, and their login. */
+export type ApiUser = { id: number; login: string };
+
+/** A GitHub user to add to a project, by user ID, with the login to show. */
+export type Invitee = { id: number; login: string };
 
 /**
  * A project's retention in days, 0 being forever, and the values it may pick:
@@ -82,16 +96,18 @@ export type Metrics = {
 };
 
 export interface IApi {
-	/** Records a sign-in of the signed-in login, with their GitHub user ID and public email. */
-	upsertCurrentUser(githubId: number, email: string): Promise<User>;
+	/** Records a sign-in of the signed-in user, with their public email. */
+	upsertCurrentUser(email: string): Promise<User>;
 	getProjects(): Promise<UserProject[]>;
 	createProject(name: string, slug: string): Promise<Project>;
 	updateProject(id: string, name: string): Promise<Project>;
 	deleteProject(id: string): Promise<void>;
 	getMembers(projectId: string): Promise<ProjectMember[]>;
-	addMember(projectId: string, login: string, role: ProjectRole): Promise<void>;
-	updateMemberRole(projectId: string, login: string, role: ProjectRole): Promise<void>;
-	removeMember(projectId: string, login: string): Promise<void>;
+	addMember(projectId: string, invitee: Invitee, role: ProjectRole): Promise<void>;
+	/** `memberId` is the membership's `id`. */
+	updateMemberRole(projectId: string, memberId: string, role: ProjectRole): Promise<void>;
+	/** `memberId` is the membership's `id`. */
+	removeMember(projectId: string, memberId: string): Promise<void>;
 	getKeys(projectId: string): Promise<ApiKey[]>;
 	createKey(projectId: string, scopes: ApiKeyScope[]): Promise<CreatedApiKey>;
 	deleteKey(projectId: string, id: string): Promise<void>;
@@ -108,22 +124,25 @@ export class Api implements IApi {
 	constructor(
 		private readonly baseUrl: string,
 		private readonly secret: string,
-		private readonly userLogin: string,
+		private readonly user: ApiUser,
 	) {}
 
+	// The broker authorizes by the user ID; the login names memberships stored
+	// before user IDs, and is what the user is called.
 	private internalHeaders(extra?: Record<string, string>): Record<string, string> {
 		return {
 			'X-Internal-Secret': this.secret,
-			'X-User-Login': this.userLogin,
+			'X-User-ID': String(this.user.id),
+			'X-User-Login': this.user.login,
 			...extra,
 		};
 	}
 
-	public async upsertCurrentUser(githubId: number, email: string): Promise<User> {
+	public async upsertCurrentUser(email: string): Promise<User> {
 		const res = await fetch(`${this.baseUrl}users/me`, {
 			method: 'PUT',
 			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
-			body: JSON.stringify({ github_id: githubId, email }),
+			body: JSON.stringify({ email }),
 		});
 		const json = (await res.json()) as ApiResponse<User>;
 		if (json.error) throw new Error(json.message);
@@ -186,19 +205,19 @@ export class Api implements IApi {
 		return json.data ?? [];
 	}
 
-	public async addMember(projectId: string, login: string, role: ProjectRole): Promise<void> {
+	public async addMember(projectId: string, invitee: Invitee, role: ProjectRole): Promise<void> {
 		const res = await fetch(`${this.baseUrl}projects/${projectId}/members`, {
 			method: 'POST',
 			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
-			body: JSON.stringify({ login, role }),
+			body: JSON.stringify({ login: invitee.login, user_id: invitee.id, role }),
 		});
 		const json = (await res.json()) as ApiResponse<void>;
 		if (json.error) throw new Error(json.message);
 	}
 
-	public async updateMemberRole(projectId: string, login: string, role: ProjectRole): Promise<void> {
+	public async updateMemberRole(projectId: string, memberId: string, role: ProjectRole): Promise<void> {
 		// Encoded for the same reason as in removeMember.
-		const res = await fetch(`${this.baseUrl}projects/${projectId}/members/${encodeURIComponent(login)}`, {
+		const res = await fetch(`${this.baseUrl}projects/${projectId}/members/${encodeURIComponent(memberId)}`, {
 			method: 'PATCH',
 			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
 			body: JSON.stringify({ role }),
@@ -207,10 +226,10 @@ export class Api implements IApi {
 		if (json.error) throw new Error(json.message);
 	}
 
-	public async removeMember(projectId: string, login: string): Promise<void> {
-		// GitHub logins are URL-safe, but the value reaches us from a form field —
-		// encoding it keeps a hand-crafted login from reshaping the path.
-		const res = await fetch(`${this.baseUrl}projects/${projectId}/members/${encodeURIComponent(login)}`, {
+	public async removeMember(projectId: string, memberId: string): Promise<void> {
+		// Membership ids are URL-safe, but the value reaches us from a form field —
+		// encoding it keeps a hand-crafted one from reshaping the path.
+		const res = await fetch(`${this.baseUrl}projects/${projectId}/members/${encodeURIComponent(memberId)}`, {
 			method: 'DELETE',
 			headers: this.internalHeaders(),
 		});
@@ -333,9 +352,9 @@ export class Api implements IApi {
 }
 
 /**
- * Create a request-scoped API client.
- * userLogin must come from the authenticated GitHub session.
+ * Create a request-scoped API client acting for `user`, which must come from
+ * the authenticated GitHub session (its `githubUser`).
  */
-export function createApi(userLogin: string): IApi {
-	return new Api(process.env.API_URL!, process.env.INTERNAL_API_SECRET!, userLogin);
+export function createApi(user: ApiUser): IApi {
+	return new Api(process.env.API_URL!, process.env.INTERNAL_API_SECRET!, { id: user.id, login: user.login });
 }

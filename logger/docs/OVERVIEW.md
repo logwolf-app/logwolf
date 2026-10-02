@@ -31,7 +31,9 @@ The RPC server is exposed via Go's standard `net/rpc` package on TCP port 5001.
 | `RPCServer.GetLog`    | `RPCLogEntryFilter` | `LogEntry`   | Fetch one entry by id within a project             |
 | `RPCServer.DeleteLog` | `RPCLogEntryFilter` | `int64`      | Delete matching log entries; returns count deleted |
 
-`RPCServer.ProjectAccess` (`RPCProjectAccessArgs` → `ProjectAccess`) answers every Broker access check in one call: whether the project exists, and the login's role in it (empty for a non-member). A malformed project id is an `invalid project ID` error, which the Broker answers as 404.
+`RPCServer.ProjectAccess` (`RPCProjectAccessArgs` → `ProjectAccess`) answers every Broker access check in one call: whether the project exists, and the caller's role in it (empty for a non-member). The caller is a GitHub user ID, with their current login for memberships stored before user IDs (`data.MemberFilter`); `ListUserProjects` takes the same pair. A malformed project id is an `invalid project ID` error, which the Broker answers as 404.
+
+`AddMember` refuses (`ErrInvalidUser`) a member without a positive GitHub user ID or a login. `CreateProject` needs the owner's user ID as well as their login. `RemoveMember` and `UpdateMemberRole` name the member by the membership's own id (`MemberID`); one that is not an ObjectID is an `invalid member ID` error, which the Broker answers as 404.
 
 API keys live here too, so the Broker needs no database of its own:
 

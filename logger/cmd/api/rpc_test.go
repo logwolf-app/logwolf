@@ -20,7 +20,7 @@ func TestProjectAccess_MalformedProjectID(t *testing.T) {
 
 	for _, id := range []string{"not-a-valid-object-id", ""} {
 		var reply data.ProjectAccess
-		err := srv.ProjectAccess(&data.RPCProjectAccessArgs{ProjectID: id, GithubLogin: "jpricardo"}, &reply)
+		err := srv.ProjectAccess(&data.RPCProjectAccessArgs{ProjectID: id, UserID: 583231, GithubLogin: "jpricardo"}, &reply)
 		if err == nil || !strings.Contains(err.Error(), "invalid project ID") {
 			t.Errorf("ProjectAccess(%q): want an invalid project ID error, got %v", id, err)
 		}
@@ -185,16 +185,56 @@ func TestProjectScopedMethods_MalformedProjectID(t *testing.T) {
 }
 
 // TestCreateProject_RequiresOwner checks that no project is created without the
-// owner it is created with: one without an owner could never be reached.
+// owner it is created with: one without an owner could never be reached. The
+// owner is a user, so it needs their GitHub user ID as well as their login.
 func TestCreateProject_RequiresOwner(t *testing.T) {
 	srv := &RPCServer{} // zero-value models: reaching MongoDB would panic
 
-	for _, owner := range []string{"", "   "} {
+	for _, owner := range []struct {
+		id    int64
+		login string
+	}{{583231, ""}, {583231, "   "}, {0, "octocat"}, {-1, "octocat"}} {
 		var reply data.Project
-		err := srv.CreateProject(&data.RPCCreateProjectArgs{Name: "App", Slug: "app", Owner: owner}, &reply)
+		err := srv.CreateProject(&data.RPCCreateProjectArgs{Name: "App", Slug: "app", OwnerID: owner.id, Owner: owner.login}, &reply)
 		if err == nil || !strings.Contains(err.Error(), "owner is required") {
-			t.Errorf("CreateProject with owner %q: want \"owner is required\", got %v", owner, err)
+			t.Errorf("CreateProject with owner %+v: want \"owner is required\", got %v", owner, err)
 		}
+	}
+}
+
+// TestAddMember_RequiresAUser: a new membership names its user by GitHub user
+// ID, so one without a usable ID, or without a login to show, is refused before
+// the database.
+func TestAddMember_RequiresAUser(t *testing.T) {
+	srv := &RPCServer{} // zero-value models: reaching MongoDB would panic
+
+	project := primitive.NewObjectID().Hex()
+	for _, args := range []data.RPCAddMemberArgs{
+		{ProjectID: project, UserID: 0, GithubLogin: "octocat", Role: data.RoleMember},
+		{ProjectID: project, UserID: -5, GithubLogin: "octocat", Role: data.RoleMember},
+		{ProjectID: project, UserID: 583231, GithubLogin: " ", Role: data.RoleMember},
+	} {
+		var reply string
+		if err := srv.AddMember(&args, &reply); !errors.Is(err, data.ErrInvalidUser) {
+			t.Errorf("AddMember(%+v): want ErrInvalidUser, got %v", args, err)
+		}
+	}
+}
+
+// TestMemberChanges_MalformedMemberID: a member id that is not an ObjectID names
+// no membership, and the error says so in the words the broker reads as a 404.
+func TestMemberChanges_MalformedMemberID(t *testing.T) {
+	srv := &RPCServer{} // zero-value models: reaching MongoDB would panic
+
+	project := primitive.NewObjectID().Hex()
+	var reply string
+	if err := srv.RemoveMember(&data.RPCRemoveMemberArgs{ProjectID: project, MemberID: "octocat"}, &reply); err == nil ||
+		!strings.Contains(err.Error(), "not a valid ObjectID") {
+		t.Errorf("RemoveMember with a login for an id: want a \"not a valid ObjectID\" error, got %v", err)
+	}
+	if err := srv.UpdateMemberRole(&data.RPCUpdateMemberRoleArgs{ProjectID: project, MemberID: "583231", Role: data.RoleOwner}, &reply); err == nil ||
+		!strings.Contains(err.Error(), "not a valid ObjectID") {
+		t.Errorf("UpdateMemberRole with a user ID for an id: want a \"not a valid ObjectID\" error, got %v", err)
 	}
 }
 

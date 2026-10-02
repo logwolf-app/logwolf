@@ -42,7 +42,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 	if (!slug) return { error: 'Name must contain at least one letter or number.' };
 
 	try {
-		const api = createApi(user.login);
+		const api = createApi(user);
 		const project = await api.createProject(name, slug);
 		event?.set('actionData', project);
 

@@ -49,7 +49,9 @@ export async function handleGitHubCallback(code: string, request: Request) {
 	// in is still decided by login, above. A sign-in that cannot be recorded does
 	// not go through.
 	try {
-		await createApi(user.login).upsertCurrentUser(user.id, typeof user.email === 'string' ? user.email : '');
+		await createApi({ id: user.id, login: user.login }).upsertCurrentUser(
+			typeof user.email === 'string' ? user.email : '',
+		);
 	} catch (err) {
 		console.error('Could not record the sign-in', err);
 		throw redirect('/auth?error=unavailable');

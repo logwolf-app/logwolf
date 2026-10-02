@@ -29,7 +29,7 @@ function stubGitHub(login: string, broker: Broker = { calls: [] }) {
 				broker.calls.push({ headers: new Headers(init.headers), body });
 				const status = broker.status ?? 200;
 				return Response.json(
-					{ error: status >= 400, message: 'm', data: { id: 'u1', github_id: body.github_id, github_login: login } },
+					{ error: status >= 400, message: 'm', data: { id: 'u1', github_id: 583231, github_login: login } },
 					{ status },
 				);
 			}
@@ -74,10 +74,11 @@ describe('handleGitHubCallback', () => {
 
 		const res = (await handleGitHubCallback('code', new Request('http://localhost/auth'))) as Response;
 
-		// The login goes as the signed-in user, in GitHub's casing; a private email as none.
+		// The user goes by GitHub user ID and login, in GitHub's casing; a private email as none.
 		expect(broker.calls).toHaveLength(1);
+		expect(broker.calls[0]!.headers.get('X-User-ID')).toBe('583231');
 		expect(broker.calls[0]!.headers.get('X-User-Login')).toBe('Octocat');
-		expect(broker.calls[0]!.body).toEqual({ github_id: 583231, email: '' });
+		expect(broker.calls[0]!.body).toEqual({ email: '' });
 
 		const session = await getSession(res.headers.get('Set-Cookie')!.split(';')[0]!);
 		expect(session.get('githubUser')).toMatchObject({ id: 583231, login: 'Octocat' });

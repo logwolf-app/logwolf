@@ -30,7 +30,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	const projectId = await getCurrentProjectID(request);
 	if (!projectId) return { metrics: null };
 
-	const api = createApi(user.login);
+	const api = createApi(user);
 	const metrics = api.getMetrics(projectId);
 	event?.set('loaderData', 'async data');
 

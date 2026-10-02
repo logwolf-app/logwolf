@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/rpc"
 	"sync"
@@ -228,7 +229,8 @@ func TestUserRPC(t *testing.T) {
 }
 
 // TestSignInThroughBroker records sign-ins the way the dashboard does, through
-// the broker's PUT /users/me: a rename is the same user under the new login.
+// the broker's PUT /users/me, which takes the user from X-User-ID and
+// X-User-Login: a rename is the same user under the new login.
 func TestSignInThroughBroker(t *testing.T) {
 	stack := sharedStack(t)
 
@@ -236,8 +238,11 @@ func TestSignInThroughBroker(t *testing.T) {
 	githubID := time.Now().UnixNano()
 
 	var first data.User
-	raw := mustInternalCall(t, stack.brokerURL, http.MethodPut, "/users/me", "Broker-User",
-		map[string]any{"github_id": githubID, "email": "broker@example.com"}, http.StatusOK)
+	status, raw := internalCallAs(t, stack.brokerURL, http.MethodPut, "/users/me", "Broker-User", githubID,
+		map[string]any{"email": "broker@example.com"})
+	if status != http.StatusOK {
+		t.Fatalf("first sign-in = %d, want 200 (data: %s)", status, raw)
+	}
 	if err := json.Unmarshal(raw, &first); err != nil {
 		t.Fatalf("decode first sign-in: %v", err)
 	}
@@ -246,8 +251,10 @@ func TestSignInThroughBroker(t *testing.T) {
 	}
 
 	var renamed data.User
-	raw = mustInternalCall(t, stack.brokerURL, http.MethodPut, "/users/me", "Broker-User-Renamed",
-		map[string]any{"github_id": githubID}, http.StatusOK)
+	status, raw = internalCallAs(t, stack.brokerURL, http.MethodPut, "/users/me", "Broker-User-Renamed", githubID, map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("sign-in after rename = %d, want 200 (data: %s)", status, raw)
+	}
 	if err := json.Unmarshal(raw, &renamed); err != nil {
 		t.Fatalf("decode sign-in after rename: %v", err)
 	}
@@ -255,7 +262,80 @@ func TestSignInThroughBroker(t *testing.T) {
 		t.Errorf("sign-in after rename: got %+v, want user %s with the new login and no email", renamed, first.ID.Hex())
 	}
 
-	if status, _ := internalCall(t, stack.brokerURL, http.MethodPut, "/users/me", "broker-user", map[string]any{}); status != http.StatusBadRequest {
-		t.Errorf("sign-in without a GitHub ID = %d, want 400", status)
+	if status, _ := internalCallAs(t, stack.brokerURL, http.MethodPut, "/users/me", "broker-user", 0, map[string]any{}); status != http.StatusUnauthorized {
+		t.Errorf("sign-in without a GitHub ID = %d, want 401", status)
+	}
+}
+
+// TestProjectAccessByUserIDThroughBroker drives the dashboard's membership
+// checks end to end: the member an owner adds belongs to their GitHub user ID,
+// keeps access after renaming their account, and whoever takes their old login
+// gets none of it.
+func TestProjectAccessByUserIDThroughBroker(t *testing.T) {
+	stack := sharedStack(t)
+
+	// The stack's database is shared, so the ids are ones no other test uses.
+	base := time.Now().UnixNano()
+	ownerID, memberID, impostorID := base, base+1, base+2
+	login := fmt.Sprintf("id-member-%d", base)
+
+	status, raw := internalCallAs(t, stack.brokerURL, http.MethodPost, "/projects", "id-owner", ownerID,
+		map[string]any{"name": "By ID", "slug": "by-id"})
+	if status != http.StatusCreated {
+		t.Fatalf("create project = %d, want 201 (data: %s)", status, raw)
+	}
+	var project data.Project
+	if err := json.Unmarshal(raw, &project); err != nil {
+		t.Fatalf("decode project: %v", err)
+	}
+	projectPath := "/projects/" + project.ID.Hex()
+
+	status, raw = internalCallAs(t, stack.brokerURL, http.MethodPost, projectPath+"/members", "id-owner", ownerID,
+		map[string]any{"login": login, "user_id": memberID, "role": data.RoleMember})
+	if status != http.StatusCreated {
+		t.Fatalf("add member = %d, want 201 (data: %s)", status, raw)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		login  string
+		userID int64
+		want   int
+	}{
+		{"the member", login, memberID, http.StatusOK},
+		{"the member after a rename", login + "-renamed", memberID, http.StatusOK},
+		{"another account with the member's login", login, impostorID, http.StatusForbidden},
+	} {
+		if status, raw := internalCallAs(t, stack.brokerURL, http.MethodGet, projectPath, tc.login, tc.userID, nil); status != tc.want {
+			t.Errorf("%s: GET %s = %d, want %d (data: %s)", tc.name, projectPath, status, tc.want, raw)
+		}
+	}
+
+	// Owner-only routes go by the ID as well: the member's ID under the owner's
+	// login is still only a member.
+	if status, _ := internalCallAs(t, stack.brokerURL, http.MethodDelete, projectPath, "id-owner", memberID, nil); status != http.StatusForbidden {
+		t.Errorf("delete as the member under the owner's login = %d, want 403", status)
+	}
+
+	// The member is removed by their membership's id, which the listing gives.
+	status, raw = internalCallAs(t, stack.brokerURL, http.MethodGet, projectPath+"/members", "id-owner", ownerID, nil)
+	var members []data.ProjectMember
+	if err := json.Unmarshal(raw, &members); status != http.StatusOK || err != nil {
+		t.Fatalf("list members = %d, %v (data: %s)", status, err, raw)
+	}
+	var membership string
+	for _, m := range members {
+		if m.UserID == memberID {
+			membership = m.ID.Hex()
+		}
+	}
+	if membership == "" {
+		t.Fatalf("members %+v lack user %d", members, memberID)
+	}
+	if status, raw := internalCallAs(t, stack.brokerURL, http.MethodDelete, projectPath+"/members/"+membership, "id-owner", ownerID, nil); status != http.StatusOK {
+		t.Fatalf("remove member = %d, want 200 (data: %s)", status, raw)
+	}
+	if status, _ := internalCallAs(t, stack.brokerURL, http.MethodGet, projectPath, login, memberID, nil); status != http.StatusForbidden {
+		t.Errorf("removed member = %d, want 403", status)
 	}
 }

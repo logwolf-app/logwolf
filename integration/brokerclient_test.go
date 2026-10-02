@@ -7,18 +7,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"logwolf-toolbox/data"
 )
 
 // Helpers for driving the Broker over HTTP the way its two kinds of caller do:
 // an SDK client holding an API key, and the dashboard holding the internal
-// secret plus a GitHub login.
+// secret plus the signed-in user (GitHub user ID and login).
 
 // --- SDK routes (API key) ---
 
@@ -123,10 +127,27 @@ func deleteLogCount(t *testing.T, brokerURL, apiKey, logID string) int {
 
 // --- internal routes (dashboard) ---
 
+// testUserID is the GitHub user ID the tests give a login: a fixed positive
+// number per login, whatever its casing, so a user's requests and their
+// memberships agree without a table of users.
+func testUserID(login string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(data.NormalizeGithubLogin(login)))
+	return int64(h.Sum64()>>2) + 1
+}
+
 // internalCall performs a dashboard-style request: internal secret plus the
-// GitHub login the broker checks project membership against. It returns the
-// status code and the decoded "data" member of the response envelope.
+// signed-in user the broker checks project membership against, by GitHub user
+// ID (testUserID of the login) and login. It returns the status code and the
+// decoded "data" member of the response envelope.
 func internalCall(t *testing.T, brokerURL, method, path, userLogin string, body any) (int, json.RawMessage) {
+	t.Helper()
+	return internalCallAs(t, brokerURL, method, path, userLogin, testUserID(userLogin), body)
+}
+
+// internalCallAs is internalCall as the user with this GitHub user ID; 0 leaves
+// X-User-ID out.
+func internalCallAs(t *testing.T, brokerURL, method, path, userLogin string, userID int64, body any) (int, json.RawMessage) {
 	t.Helper()
 
 	var reader io.Reader
@@ -144,6 +165,9 @@ func internalCall(t *testing.T, brokerURL, method, path, userLogin string, body 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Secret", internalSecret)
+	if userID != 0 {
+		req.Header.Set("X-User-ID", strconv.FormatInt(userID, 10))
+	}
 	req.Header.Set("X-User-Login", userLogin)
 
 	resp, err := http.DefaultClient.Do(req)

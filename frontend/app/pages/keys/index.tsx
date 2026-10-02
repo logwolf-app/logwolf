@@ -36,7 +36,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	const projectId = await getCurrentProjectID(request);
 	if (!projectId) return { keys: [], noProject: true };
 
-	const api = createApi(user.login);
+	const api = createApi(user);
 	const res = await api.getKeys(projectId);
 	event?.set('loaderData', res);
 
@@ -56,7 +56,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 		const intent = fd.get('intent');
 		event?.set('intent', intent);
 
-		const api = createApi(user.login);
+		const api = createApi(user);
 
 		// Both intents act on the project in session rather than one named by the
 		// form, so a tab left open on a since-switched project cannot mint or

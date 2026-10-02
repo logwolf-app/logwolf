@@ -21,7 +21,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	const session = await getSession(request.headers.get('Cookie'));
 	const csrfToken = getOrCreateCsrfToken(session);
 
-	const api = createApi(user.login);
+	const api = createApi(user);
 	const projects = await api.getProjects();
 	const url = new URL(request.url);
 

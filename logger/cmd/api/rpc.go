@@ -200,8 +200,9 @@ func (r *RPCServer) GetMetrics(args *data.ProjectArgs, reply *data.Metrics) erro
 	return nil
 }
 
-// CreateProject creates a project owned by args.Owner. The project and the
-// owner membership are written in one transaction, so a failure leaves neither.
+// CreateProject creates a project owned by the user args.OwnerID, whose login is
+// args.Owner. The project and the owner membership are written in one
+// transaction, so a failure leaves neither.
 func (r *RPCServer) CreateProject(args *data.RPCCreateProjectArgs, reply *data.Project) error {
 	if args.Name == "" {
 		return fmt.Errorf("CreateProject: name is required")
@@ -209,11 +210,11 @@ func (r *RPCServer) CreateProject(args *data.RPCCreateProjectArgs, reply *data.P
 	if !data.ValidSlug(args.Slug) {
 		return fmt.Errorf("CreateProject: invalid slug %q", args.Slug)
 	}
-	if data.NormalizeGithubLogin(args.Owner) == "" {
+	if args.OwnerID <= 0 || data.NormalizeGithubLogin(args.Owner) == "" {
 		return fmt.Errorf("CreateProject: owner is required")
 	}
-	log.Printf("Creating project: %s (%s) owned by %s", args.Name, args.Slug, args.Owner)
-	project, err := r.models.CreateProjectWithOwner(data.Project{Name: args.Name, Slug: args.Slug}, args.Owner)
+	log.Printf("Creating project: %s (%s) owned by %s (%d)", args.Name, args.Slug, args.Owner, args.OwnerID)
+	project, err := r.models.CreateProjectWithOwner(data.Project{Name: args.Name, Slug: args.Slug}, args.OwnerID, args.Owner)
 	if err != nil {
 		log.Println("Error creating project:", err)
 		return err
@@ -286,9 +287,11 @@ func (r *RPCServer) requestPurge(projectID primitive.ObjectID) {
 	}
 }
 
+// ListUserProjects lists the projects of the user args.UserID, with the
+// memberships not yet linked to a user found by their current login.
 func (r *RPCServer) ListUserProjects(args *data.RPCUserProjectsArgs, reply *[]data.UserProject) error {
-	log.Printf("Listing projects for user: %s", args.GithubLogin)
-	projects, err := r.models.GetProjectsForUser(args.GithubLogin)
+	log.Printf("Listing projects for user: %d (%s)", args.UserID, args.GithubLogin)
+	projects, err := r.models.GetProjectsForUser(args.UserID, args.GithubLogin)
 	if err != nil {
 		log.Println("Error listing user projects:", err)
 		return err
@@ -297,17 +300,26 @@ func (r *RPCServer) ListUserProjects(args *data.RPCUserProjectsArgs, reply *[]da
 	return nil
 }
 
+// AddMember adds the user args.UserID to a project. A membership always names
+// its user: only those stored before user IDs existed have none.
 func (r *RPCServer) AddMember(args *data.RPCAddMemberArgs, reply *string) error {
 	if !data.ValidRole(args.Role) {
 		return fmt.Errorf("AddMember: invalid role %q", args.Role)
 	}
-	log.Printf("Adding member %s to project %s", args.GithubLogin, args.ProjectID)
+	if args.UserID <= 0 {
+		return fmt.Errorf("AddMember: %w: GitHub user ID must be positive, got %d", data.ErrInvalidUser, args.UserID)
+	}
+	if data.NormalizeGithubLogin(args.GithubLogin) == "" {
+		return fmt.Errorf("AddMember: %w: login is required", data.ErrInvalidUser)
+	}
+	log.Printf("Adding member %s (%d) to project %s", args.GithubLogin, args.UserID, args.ProjectID)
 	projectID, err := primitive.ObjectIDFromHex(args.ProjectID)
 	if err != nil {
 		return fmt.Errorf("AddMember: invalid project ID: %w", err)
 	}
 	_, err = r.models.InsertProjectMember(data.ProjectMember{
 		ProjectID:   projectID,
+		UserID:      args.UserID,
 		GithubLogin: args.GithubLogin,
 		Role:        args.Role,
 	})
@@ -319,13 +331,27 @@ func (r *RPCServer) AddMember(args *data.RPCAddMemberArgs, reply *string) error 
 	return nil
 }
 
+// parseMemberID parses a membership id. One that is not an ObjectID names no
+// membership, and the error says so the way the broker reads as not found.
+func parseMemberID(op, hex string) (primitive.ObjectID, error) {
+	id, err := primitive.ObjectIDFromHex(hex)
+	if err != nil {
+		return primitive.NilObjectID, fmt.Errorf("%s: invalid member ID: %w", op, err)
+	}
+	return id, nil
+}
+
 func (r *RPCServer) RemoveMember(args *data.RPCRemoveMemberArgs, reply *string) error {
-	log.Printf("Removing member %s from project %s", args.GithubLogin, args.ProjectID)
+	log.Printf("Removing member %s from project %s", args.MemberID, args.ProjectID)
 	projectID, err := primitive.ObjectIDFromHex(args.ProjectID)
 	if err != nil {
 		return fmt.Errorf("RemoveMember: invalid project ID: %w", err)
 	}
-	if err := r.models.RemoveProjectMember(projectID, args.GithubLogin); err != nil {
+	memberID, err := parseMemberID("RemoveMember", args.MemberID)
+	if err != nil {
+		return err
+	}
+	if err := r.models.RemoveProjectMember(projectID, memberID); err != nil {
 		log.Println("Error removing member:", err)
 		return err
 	}
@@ -337,12 +363,16 @@ func (r *RPCServer) UpdateMemberRole(args *data.RPCUpdateMemberRoleArgs, reply *
 	if !data.ValidRole(args.Role) {
 		return fmt.Errorf("UpdateMemberRole: invalid role %q", args.Role)
 	}
-	log.Printf("Setting role of member %s in project %s to %s", args.GithubLogin, args.ProjectID, args.Role)
+	log.Printf("Setting role of member %s in project %s to %s", args.MemberID, args.ProjectID, args.Role)
 	projectID, err := primitive.ObjectIDFromHex(args.ProjectID)
 	if err != nil {
 		return fmt.Errorf("UpdateMemberRole: invalid project ID: %w", err)
 	}
-	if err := r.models.UpdateProjectMemberRole(projectID, args.GithubLogin, args.Role); err != nil {
+	memberID, err := parseMemberID("UpdateMemberRole", args.MemberID)
+	if err != nil {
+		return err
+	}
+	if err := r.models.UpdateProjectMemberRole(projectID, memberID, args.Role); err != nil {
 		log.Println("Error updating member role:", err)
 		return err
 	}
@@ -350,14 +380,16 @@ func (r *RPCServer) UpdateMemberRole(args *data.RPCUpdateMemberRoleArgs, reply *
 	return nil
 }
 
-// ProjectAccess reports whether the project exists and the login's role in it.
-// A member's project exists, so only a non-member costs a second query.
+// ProjectAccess reports whether the project exists and the caller's role in it,
+// the caller being a GitHub user ID with, for memberships not yet linked to a
+// user, their current login. A member's project exists, so only a non-member
+// costs a second query.
 func (r *RPCServer) ProjectAccess(args *data.RPCProjectAccessArgs, reply *data.ProjectAccess) error {
 	projectID, err := parseProjectID("ProjectAccess", args.ProjectID)
 	if err != nil {
 		return err
 	}
-	role, err := r.models.MemberRole(projectID, args.GithubLogin)
+	role, err := r.models.MemberRole(projectID, args.UserID, args.GithubLogin)
 	if err != nil {
 		return err
 	}

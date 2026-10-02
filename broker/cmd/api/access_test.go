@@ -21,6 +21,11 @@ func path(suffix string) func(string) string {
 	return func(id string) string { return "/projects/" + id + suffix }
 }
 
+// memberTarget is the route of login's membership of the project.
+func memberTarget(login string) func(string) string {
+	return func(id string) string { return memberPath(id, login) }
+}
+
 func noBody(string) any { return nil }
 
 func constBody(body any) func(string) any { return func(string) any { return body } }
@@ -42,9 +47,9 @@ var projectRoutes = []projectRoute{
 	{http.MethodPatch, path(""), constBody(map[string]string{"name": "Renamed"}), true},
 	{http.MethodDelete, path(""), noBody, true},
 	{http.MethodGet, path("/members"), noBody, false},
-	{http.MethodPost, path("/members"), constBody(map[string]string{"login": "newcomer", "role": data.RoleMember}), true},
-	{http.MethodPatch, path("/members/member-a"), constBody(map[string]string{"role": data.RoleOwner}), true},
-	{http.MethodDelete, path("/members/member-a"), noBody, true},
+	{http.MethodPost, path("/members"), constBody(map[string]any{"login": "newcomer", "user_id": testUserID("newcomer"), "role": data.RoleMember}), true},
+	{http.MethodPatch, memberTarget("member-a"), constBody(map[string]string{"role": data.RoleOwner}), true},
+	{http.MethodDelete, memberTarget("member-a"), noBody, true},
 	{http.MethodGet, path("/logs"), noBody, false},
 	{http.MethodPost, path("/logs"), constBody(map[string]string{"name": "x"}), false},
 	{http.MethodGet, path("/logs/" + alphaLogID), noBody, false},

@@ -48,12 +48,14 @@ Replies never carry a key's bcrypt hash. `gob` sends every exported field whatev
 
 Users are keyed by GitHub user ID, which survives a rename; the login is only what they were called at their last sign-in:
 
-| Method                 | Input               | Output            | Description                                                               |
-| ---------------------- | ------------------- | ----------------- | ------------------------------------------------------------------------- |
-| `RPCServer.UpsertUser` | `RPCUpsertUserArgs` | `User`            | Create the user with this GitHub ID, or refresh their login and email     |
-| `RPCServer.GetUser`    | `RPCGetUserArgs`    | `RPCGetUserReply` | Look a user up by GitHub ID; one who has never signed in is `Found` false |
+| Method                 | Input               | Output            | Description                                                                                       |
+| ---------------------- | ------------------- | ----------------- | ------------------------------------------------------------------------------------------------- |
+| `RPCServer.UpsertUser` | `RPCUpsertUserArgs` | `User`            | Create the user with this GitHub ID, or refresh their login and email; link login-only memberships |
+| `RPCServer.GetUser`    | `RPCGetUserArgs`    | `RPCGetUserReply` | Look a user up by GitHub ID; one who has never signed in is `Found` false                         |
 
 Both refuse a GitHub ID that is not positive with `data.ErrInvalidUser`.
+
+`UpsertUser` is called at each sign-in, so it is also where memberships stored before user IDs, which carry only a login, are linked to the user signing in under that login (`data.LinkMemberships`). A failure in either step fails the call, and the sign-in with it; both are idempotent, so the next sign-in finishes the job.
 
 ## HTTP interface
 
@@ -119,7 +121,7 @@ Then it adopts any data written by a pre-multi-tenancy build:
 
 Then, on every start and whatever the orphan count, Logger checks that the `Default` project (if there is one) has an owner. If it has none, every owner login gets an owner membership — a plain member on the list is promoted. A `Default` project that already has an owner is left alone, so someone removed from it in the dashboard is not added back.
 
-The owner logins are `LOGWOLF_ALLOWED_GITHUB_USERS` plus `LOGWOLF_DEFAULT_PROJECT_OWNERS`.
+The owner logins are `LOGWOLF_ALLOWED_GITHUB_USERS` plus `LOGWOLF_DEFAULT_PROJECT_OWNERS`. Logger has no GitHub token to resolve them to user IDs, so these memberships carry the login alone; each is linked to its user at their first sign-in (`UpsertUser`), and until then matched by login. Both steps match only memberships not linked yet: a login that a linked membership still stores is skipped, since that membership belongs to whoever it is linked to.
 
 The migration is idempotent — once no orphaned documents remain and `Default` has an owner it is a no-op, so it runs safely on every start. A run that fails partway does not stop the service from booting; the failure is logged as `Migration: FAILED`.
 

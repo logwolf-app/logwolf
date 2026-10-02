@@ -10,6 +10,7 @@ import { Field, FieldGroup, FieldLabel } from '~/components/ui/field';
 import { Input } from '~/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '~/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '~/components/ui/table';
+import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
 import type { ProjectMember } from '~/lib/api';
 
@@ -108,6 +109,7 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 												</span>
 												<span className='font-medium'>{member.github_login}</span>
 												{isCurrentUser(member, currentUser) && <Badge variant='outline'>you</Badge>}
+												{!member.user_id && <NotYetLinked login={member.github_login} />}
 											</div>
 										</TableCell>
 
@@ -208,6 +210,28 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 				)}
 			</div>
 		</SettingsRow>
+	);
+}
+
+/**
+ * Marks a membership stored before members were tied to GitHub accounts. It
+ * carries a login alone, and is linked to whoever signs in under that login
+ * next; until then the login is all that decides who has it.
+ */
+function NotYetLinked({ login }: { login: string }) {
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Badge variant='outline' tabIndex={0} className='border-dashed'>
+					not yet linked
+				</Badge>
+			</TooltipTrigger>
+
+			<TooltipContent className='max-w-64'>
+				Added before members were tied to GitHub accounts. It links to {login}&rsquo;s account the next time they sign
+				in; until then, whoever holds the login {login} on GitHub gets this access.
+			</TooltipContent>
+		</Tooltip>
 	);
 }
 

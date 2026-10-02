@@ -188,3 +188,31 @@ func TestMemberFilter(t *testing.T) {
 		}
 	}
 }
+
+// TestLinkMemberships_RefusesAnUnkeyedUser: memberships are linked to a GitHub
+// user ID under a login, so a call without either is refused before any query.
+// The zero-value Models has no database, so a call that got past the check
+// would panic instead of answering.
+func TestLinkMemberships_RefusesAnUnkeyedUser(t *testing.T) {
+	var m Models
+
+	cases := []struct {
+		name  string
+		id    int64
+		login string
+	}{
+		{"zero id", 0, "jdoe"},
+		{"negative id", -1, "jdoe"},
+		{"empty login", 42, ""},
+		{"blank login", 42, "   "},
+	}
+	for _, tc := range cases {
+		links, err := m.LinkMemberships(tc.id, tc.login)
+		if !errors.Is(err, ErrInvalidUser) {
+			t.Errorf("%s: LinkMemberships(%d, %q) = %v, want ErrInvalidUser", tc.name, tc.id, tc.login, err)
+		}
+		if links != (MembershipLinks{}) {
+			t.Errorf("%s: LinkMemberships reported links alongside the error: %+v", tc.name, links)
+		}
+	}
+}

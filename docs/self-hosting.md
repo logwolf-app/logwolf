@@ -310,6 +310,8 @@ docker compose logs broker
 **After upgrading, the old events are nowhere in the dashboard.**
 Logger moves data from before projects existed into a project named `Default`, owned by `LOGWOLF_ALLOWED_GITHUB_USERS` and `LOGWOLF_DEFAULT_PROJECT_OWNERS`. If neither was set, the project has no owner and Logger logs a warning on every start. Set one of them, for org-only deployments `LOGWOLF_DEFAULT_PROJECT_OWNERS`, and restart Logger. The owners then add everyone else from the project's settings page.
 
+Logger cannot ask GitHub who a configured username belongs to, so these owners, like every member added before members were tied to GitHub accounts, are recorded by username alone. Each is tied to the GitHub account that next signs in under that username, and keeps their access through later renames from then on. Until then the settings page shows them as "not yet linked"; remove any whose owner will never sign in again.
+
 ```bash
 docker compose logs logger | grep Migration
 ```

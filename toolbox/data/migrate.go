@@ -450,6 +450,14 @@ func convertProjectIDsOneByOne(ctx context.Context, coll *mongo.Collection, ids 
 // membership that already exists is left untouched unless promote is set, in
 // which case a plain member is made an owner. Returns how many logins became
 // owners.
+//
+// Logger holds no GitHub token, so it cannot tell which account a configured
+// login is: the memberships it writes carry the login alone, and LinkMemberships
+// links each to its user at their first sign-in under it, like any membership
+// stored before user IDs. For the same reason it only ever matches memberships
+// that are not linked yet. A linked membership that still stores the login
+// belongs to whoever it is linked to, possibly someone who has renamed since,
+// so it is neither promoted nor duplicated: the login is skipped.
 func (m *Models) ensureOwners(ctx context.Context, projectID primitive.ObjectID, logins []string, promote bool) (int64, error) {
 	collection := m.client.Database("logs").Collection("project_members")
 	var changed int64
@@ -475,10 +483,15 @@ func (m *Models) ensureOwners(ctx context.Context, projectID primitive.ObjectID,
 
 		result, err := collection.UpdateOne(
 			ctx,
-			bson.M{"project_id": projectID, "github_login": login},
+			bson.M{"project_id": projectID, "github_login": login, "user_id": bson.M{"$exists": false}},
 			update,
 			options.Update().SetUpsert(true),
 		)
+		// The unique (project_id, github_login) index: a linked membership holds
+		// the login.
+		if mongo.IsDuplicateKeyError(err) {
+			continue
+		}
 		if err != nil {
 			return changed, fmt.Errorf("ensureOwners %s: %w", login, err)
 		}

@@ -88,8 +88,10 @@ is listed under the login of their last sign-in.
 
 The dashboard calls `PUT /users/me` at each sign-in with `{"email": "..."}`, and the broker hands
 it to `RPCServer.UpsertUser` with the caller's GitHub ID and login from the headers. The user is
-keyed by the GitHub ID, so a renamed account stays the same user with its new login. The reply is
-the user as stored.
+keyed by the GitHub ID, so a renamed account stays the same user with its new login. The logger
+also links the memberships stored before user IDs under the caller's login to their GitHub ID
+(`data.LinkMemberships`), so from then on they follow the user, not the login. The reply is the
+user as stored; a failure in either step is a 500, and the dashboard's sign-in fails with it.
 
 Every route that acts on a project denies access the same way (`access.go`):
 

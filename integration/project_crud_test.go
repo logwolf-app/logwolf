@@ -916,3 +916,181 @@ func TestGetProjectsForUser_NoMemberships(t *testing.T) {
 
 // newOID returns a fresh ObjectID guaranteed not to exist in any collection.
 func newOID() primitive.ObjectID { return primitive.NewObjectID() }
+
+// --- Linking memberships to user IDs ---
+
+// memberDoc reads one membership straight from the collection, user_id included.
+func memberDoc(t *testing.T, id primitive.ObjectID) data.ProjectMember {
+	t.Helper()
+
+	client := testMongo(t, sharedModelsMongo(t))
+	var mb data.ProjectMember
+	if err := client.Database("logs").Collection("project_members").FindOne(context.Background(), bson.M{"_id": id}).Decode(&mb); err != nil {
+		t.Fatalf("membership %s: %v", id.Hex(), err)
+	}
+	return mb
+}
+
+// insertUnlinked stores a membership the way builds before user IDs did: a
+// login and no user_id.
+func insertUnlinked(t *testing.T, m data.Models, projectID primitive.ObjectID, login, role string) primitive.ObjectID {
+	t.Helper()
+
+	pm, err := m.InsertProjectMember(data.ProjectMember{ProjectID: projectID, GithubLogin: login, Role: role})
+	if err != nil {
+		t.Fatalf("InsertProjectMember %s, unlinked: %v", login, err)
+	}
+	return pm.ID
+}
+
+// TestLinkMemberships: a sign-in links every login-only membership under the
+// user's current login to their user ID, whatever its casing, and nothing else:
+// not another login's, and not one linked to someone else that still stores
+// the login. Once linked, the membership follows the user and the login alone
+// no longer opens it.
+func TestLinkMemberships(t *testing.T) {
+	m := setupProjectModels(t)
+	erin := testUserID("erin")
+
+	asMember, _ := m.InsertProject(data.Project{Name: "As member", Slug: "as-member"})
+	asOwner, _ := m.InsertProject(data.Project{Name: "As owner", Slug: "as-owner"})
+	others, _ := m.InsertProject(data.Project{Name: "Others", Slug: "others"})
+
+	memberRow := insertUnlinked(t, m, asMember.ID, "erin", data.RoleMember)
+	ownerRow := insertUnlinked(t, m, asOwner.ID, "erin", data.RoleOwner)
+	frankRow := insertUnlinked(t, m, others.ID, "frank", data.RoleMember)
+	// Someone who was erin once, linked before renaming.
+	formerErin, err := m.InsertProjectMember(data.ProjectMember{ProjectID: others.ID, UserID: 77, GithubLogin: "erin", Role: data.RoleOwner})
+	if err != nil {
+		t.Fatalf("InsertProjectMember former erin: %v", err)
+	}
+
+	links, err := m.LinkMemberships(erin, "Erin")
+	if err != nil {
+		t.Fatalf("LinkMemberships: %v", err)
+	}
+	if links != (data.MembershipLinks{Linked: 2}) {
+		t.Errorf("LinkMemberships = %+v, want 2 linked", links)
+	}
+
+	for _, tc := range []struct {
+		name string
+		id   primitive.ObjectID
+		want int64
+	}{
+		{"erin's membership", memberRow, erin},
+		{"erin's ownership", ownerRow, erin},
+		{"frank's membership", frankRow, 0},
+		{"the former erin's membership", formerErin.ID, 77},
+	} {
+		if got := memberDoc(t, tc.id).UserID; got != tc.want {
+			t.Errorf("%s: user_id = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	if role := memberDoc(t, ownerRow).Role; role != data.RoleOwner {
+		t.Errorf("linking changed erin's role to %q", role)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		userID int64
+		login  string
+		want   string
+	}{
+		{"erin after a rename", erin, "erin-renamed", data.RoleMember},
+		{"another account with erin's login", erin + 1, "erin", ""},
+	} {
+		if role, err := m.MemberRole(asMember.ID, tc.userID, tc.login); err != nil || role != tc.want {
+			t.Errorf("%s: role=%q err=%v, want %q", tc.name, role, err, tc.want)
+		}
+	}
+
+	// A second sign-in has nothing left to link.
+	if links, err := m.LinkMemberships(erin, "erin"); err != nil || links != (data.MembershipLinks{}) {
+		t.Errorf("LinkMemberships again = %+v, %v; want nothing linked", links, err)
+	}
+}
+
+// TestLinkMemberships_MergesIntoTheUsersMembership: a user already linked to a
+// project under another login, who also holds a login-only membership there,
+// ends up with one membership: the linked one, with the higher role and the
+// older join date of the two.
+func TestLinkMemberships_MergesIntoTheUsersMembership(t *testing.T) {
+	m := setupProjectModels(t)
+	erin := testUserID("erin")
+
+	p, _ := m.InsertProject(data.Project{Name: "Both", Slug: "both"})
+	addMember(t, m, p.ID, "olivia", data.RoleOwner)
+	unlinked := insertUnlinked(t, m, p.ID, "erin", data.RoleOwner)
+	linked, err := m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, UserID: erin, GithubLogin: "erin-before", Role: data.RoleMember})
+	if err != nil {
+		t.Fatalf("InsertProjectMember erin, linked: %v", err)
+	}
+	joined := memberDoc(t, unlinked).CreatedAt
+
+	links, err := m.LinkMemberships(erin, "erin")
+	if err != nil {
+		t.Fatalf("LinkMemberships: %v", err)
+	}
+	if links != (data.MembershipLinks{Merged: 1}) {
+		t.Errorf("LinkMemberships = %+v, want 1 merged", links)
+	}
+
+	members, err := m.GetProjectMembers(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectMembers: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members = %+v, want olivia and one membership for erin", members)
+	}
+	got := memberDoc(t, linked.ID)
+	if got.UserID != erin || got.Role != data.RoleOwner || !got.CreatedAt.Equal(joined) {
+		t.Errorf("erin's membership = %+v, want user %d, owner, joined %v", got, erin, joined)
+	}
+}
+
+// TestLinkMemberships_ConcurrentSignIns: sign-ins of one user at once link each
+// membership once, and leave one membership per project.
+func TestLinkMemberships_ConcurrentSignIns(t *testing.T) {
+	m := setupProjectModels(t)
+	erin := testUserID("erin")
+
+	const projects = 5
+	for i := range projects {
+		p, _ := m.InsertProject(data.Project{Name: fmt.Sprintf("P%d", i), Slug: fmt.Sprintf("p%d", i)})
+		insertUnlinked(t, m, p.ID, "erin", data.RoleMember)
+	}
+
+	const n = 10
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var total int64
+	errs := make(chan error, n)
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			links, err := m.LinkMemberships(erin, "erin")
+			if err != nil {
+				errs <- err
+				return
+			}
+			mu.Lock()
+			total += links.Linked + links.Merged
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent LinkMemberships: %v", err)
+	}
+	if total != projects {
+		t.Errorf("concurrent sign-ins linked %d memberships, want %d", total, projects)
+	}
+
+	userProjects, err := m.GetProjectsForUser(erin, "erin-renamed")
+	if err != nil || len(userProjects) != projects {
+		t.Errorf("GetProjectsForUser after a rename = %d projects, %v; want %d", len(userProjects), err, projects)
+	}
+}

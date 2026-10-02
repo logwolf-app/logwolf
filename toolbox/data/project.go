@@ -233,7 +233,145 @@ func (m *Models) EnsureProjectIndexes() error {
 		return fmt.Errorf("EnsureProjectIndexes project_members.user_id: %w", err)
 	}
 
+	// ...and the ones not linked yet by login alone, as does LinkMemberships at
+	// every sign-in.
+	if _, err := members.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "github_login", Value: 1}},
+		Options: options.Index().SetName("member_github_login"),
+	}); err != nil {
+		return fmt.Errorf("EnsureProjectIndexes project_members.github_login: %w", err)
+	}
+
 	return nil
+}
+
+// MembershipLinks summarises one run of LinkMemberships: how many memberships
+// it linked to the user, and how many it merged into a membership the user
+// already held in the same project.
+type MembershipLinks struct {
+	Linked int64
+	Merged int64
+}
+
+// LinkMemberships attaches the GitHub user ID githubID to every membership
+// stored before user IDs under login, the user's current login. It runs at each
+// sign-in, the one moment GitHub vouches for which account holds a login: the
+// logger holds no GitHub token, so it cannot resolve these logins by itself.
+// From then on the membership is the user's, follows them through renames, and
+// is never matched by login again (MemberFilter). Memberships of people who
+// never sign in again stay login-only.
+//
+// A membership already linked to anyone, this user or another, is left alone,
+// whatever login it stores. Where the user already holds a membership in the
+// project, a second one would break the one-membership-per-user rule, so the
+// login-only one is merged into it instead: the higher role and the older join
+// date survive, as in NormalizeMemberLogins.
+//
+// It is idempotent, and does nothing for a user with no login-only memberships.
+func (m *Models) LinkMemberships(githubID int64, login string) (MembershipLinks, error) {
+	var report MembershipLinks
+	login = NormalizeGithubLogin(login)
+	if githubID <= 0 {
+		return report, fmt.Errorf("LinkMemberships: %w: GitHub user ID must be positive, got %d", ErrInvalidUser, githubID)
+	}
+	if login == "" {
+		return report, fmt.Errorf("LinkMemberships: %w: login is required", ErrInvalidUser)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	coll := m.client.Database("logs").Collection("project_members")
+	unlinked := bson.M{"user_id": bson.M{"$exists": false}, "github_login": login}
+
+	cursor, err := coll.Find(ctx, unlinked, options.Find().SetProjection(bson.M{"_id": 1, "project_id": 1}))
+	if err != nil {
+		return report, fmt.Errorf("LinkMemberships: %w", err)
+	}
+	var found []ProjectMember
+	if err := cursor.All(ctx, &found); err != nil {
+		return report, fmt.Errorf("LinkMemberships decode: %w", err)
+	}
+
+	for _, mb := range found {
+		// Matching user_id's absence again means a membership linked in the
+		// meantime, by a sign-in running alongside this one, is left alone.
+		result, err := coll.UpdateOne(ctx,
+			bson.M{"_id": mb.ID, "user_id": bson.M{"$exists": false}},
+			bson.M{"$set": bson.M{"user_id": githubID}},
+		)
+		// Only user_id changes, so only the (project_id, user_id) index can refuse
+		// it: the user is a member of this project already.
+		if mongo.IsDuplicateKeyError(err) {
+			merged, err := m.mergeIntoLinkedMembership(mb.ProjectID, mb.ID, githubID)
+			if err != nil {
+				return report, err
+			}
+			if merged {
+				report.Merged++
+			}
+			continue
+		}
+		if err != nil {
+			return report, fmt.Errorf("LinkMemberships %s: %w", mb.ID.Hex(), err)
+		}
+		report.Linked += result.ModifiedCount
+	}
+	return report, nil
+}
+
+// mergeIntoLinkedMembership folds the login-only membership unlinkedID into the
+// membership githubID already holds in the project, and reports whether it did.
+// It goes through changeMembers, so it never races a removal or a role change
+// on the same project; if the linked membership is gone by then, the login-only
+// one is simply linked.
+func (m *Models) mergeIntoLinkedMembership(projectID, unlinkedID primitive.ObjectID, githubID int64) (bool, error) {
+	var merged bool
+	err := m.changeMembers("LinkMemberships", projectID, func(sc mongo.SessionContext, coll *mongo.Collection) error {
+		merged = false
+
+		var unlinked ProjectMember
+		err := coll.FindOne(sc, bson.M{"_id": unlinkedID, "user_id": bson.M{"$exists": false}}).Decode(&unlinked)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil // removed or linked in the meantime
+		}
+		if err != nil {
+			return fmt.Errorf("LinkMemberships find %s: %w", unlinkedID.Hex(), err)
+		}
+
+		var linked ProjectMember
+		err = coll.FindOne(sc, bson.M{"project_id": projectID, "user_id": githubID}).Decode(&linked)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			if _, err := coll.UpdateOne(sc, bson.M{"_id": unlinked.ID}, bson.M{"$set": bson.M{"user_id": githubID}}); err != nil {
+				return fmt.Errorf("LinkMemberships link %s: %w", unlinked.ID.Hex(), err)
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("LinkMemberships find linked: %w", err)
+		}
+
+		// The user is an owner if either membership made them one, so the
+		// project keeps at least the owners it had, counted as people.
+		set := bson.M{}
+		if unlinked.Role == RoleOwner && linked.Role != RoleOwner {
+			set["role"] = RoleOwner
+		}
+		if unlinked.CreatedAt.Before(linked.CreatedAt) {
+			set["created_at"] = unlinked.CreatedAt
+		}
+		if len(set) > 0 {
+			if _, err := coll.UpdateOne(sc, bson.M{"_id": linked.ID}, bson.M{"$set": set}); err != nil {
+				return fmt.Errorf("LinkMemberships merge into %s: %w", linked.ID.Hex(), err)
+			}
+		}
+		if _, err := coll.DeleteOne(sc, bson.M{"_id": unlinked.ID}); err != nil {
+			return fmt.Errorf("LinkMemberships delete %s: %w", unlinked.ID.Hex(), err)
+		}
+		merged = true
+		return nil
+	})
+	return merged, err
 }
 
 func (m *Models) InsertProject(p Project) (*Project, error) {

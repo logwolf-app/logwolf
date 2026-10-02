@@ -498,24 +498,9 @@ func (m *Models) GetProjectMembers(projectID primitive.ObjectID) ([]ProjectMembe
 			userIDs = append(userIDs, mb.UserID)
 		}
 	}
-	if len(userIDs) == 0 {
-		return members, nil
-	}
-
-	userCursor, err := m.users().Find(ctx, bson.M{"github_id": bson.M{"$in": userIDs}},
-		options.Find().SetProjection(bson.M{"github_id": 1, "github_login": 1}))
+	logins, err := m.currentLogins(ctx, userIDs)
 	if err != nil {
-		return nil, fmt.Errorf("GetProjectMembers users: %w", err)
-	}
-	defer userCursor.Close(ctx)
-
-	var users []User
-	if err := userCursor.All(ctx, &users); err != nil {
-		return nil, fmt.Errorf("GetProjectMembers users decode: %w", err)
-	}
-	logins := make(map[int64]string, len(users))
-	for _, u := range users {
-		logins[u.GithubID] = u.GithubLogin
+		return nil, fmt.Errorf("GetProjectMembers: %w", err)
 	}
 	for i, mb := range members {
 		if login := logins[mb.UserID]; login != "" {
@@ -523,6 +508,31 @@ func (m *Models) GetProjectMembers(projectID primitive.ObjectID) ([]ProjectMembe
 		}
 	}
 	return members, nil
+}
+
+// currentLogins returns the login each of these users signed in under last,
+// keyed by GitHub user ID. A user who has never signed in is missing from it.
+func (m *Models) currentLogins(ctx context.Context, userIDs []int64) (map[int64]string, error) {
+	logins := map[int64]string{}
+	if len(userIDs) == 0 {
+		return logins, nil
+	}
+
+	cursor, err := m.users().Find(ctx, bson.M{"github_id": bson.M{"$in": userIDs}},
+		options.Find().SetProjection(bson.M{"github_id": 1, "github_login": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("users: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var users []User
+	if err := cursor.All(ctx, &users); err != nil {
+		return nil, fmt.Errorf("users decode: %w", err)
+	}
+	for _, u := range users {
+		logins[u.GithubID] = u.GithubLogin
+	}
+	return logins, nil
 }
 
 // RenameProject changes a project's name. Its slug stays what it was when the
@@ -650,15 +660,22 @@ func (m *Models) UpdateProjectMemberRole(projectID, memberID primitive.ObjectID,
 }
 
 // changeMembers runs fn, a change to a project's members that must never leave
-// it without an owner, in one transaction.
+// it without an owner, in one transaction. See changeMembersOf.
+func (m *Models) changeMembers(op string, projectID primitive.ObjectID, fn func(sc mongo.SessionContext, coll *mongo.Collection) error) error {
+	return m.changeMembersOf(op, "projects", "project_members", projectID, fn)
+}
+
+// changeMembersOf runs fn, a change to the members of the document parentID in
+// the parents collection that must never leave it without an owner, in one
+// transaction. fn gets the members collection.
 //
 // A transaction alone is not enough: two requests removing or demoting two
 // different owners would each read two owners from their own snapshot, write
-// different documents, never conflict, and leave the project with none. So the
-// transaction first writes to the project's own document. The second one to get
+// different documents, never conflict, and leave the parent with none. So the
+// transaction first writes to the parent's own document. The second one to get
 // there hits a write conflict, WithTransaction retries it, and the retry counts
 // the owners after the first change has committed.
-func (m *Models) changeMembers(op string, projectID primitive.ObjectID, fn func(sc mongo.SessionContext, coll *mongo.Collection) error) error {
+func (m *Models) changeMembersOf(op, parents, members string, parentID primitive.ObjectID, fn func(sc mongo.SessionContext, coll *mongo.Collection) error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -671,15 +688,15 @@ func (m *Models) changeMembers(op string, projectID primitive.ObjectID, fn func(
 	db := m.client.Database("logs")
 
 	_, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (any, error) {
-		// A membership row can outlive its project; with no project document to
+		// A membership row can outlive its parent; with no parent document to
 		// write to there is nothing to serialize on, and no owner left to protect.
-		if _, err := db.Collection("projects").UpdateOne(sc,
-			bson.M{"_id": projectID},
+		if _, err := db.Collection(parents).UpdateOne(sc,
+			bson.M{"_id": parentID},
 			bson.M{"$currentDate": bson.M{"members_updated_at": true}},
 		); err != nil {
-			return nil, fmt.Errorf("%s lock project: %w", op, err)
+			return nil, fmt.Errorf("%s lock %s: %w", op, parents, err)
 		}
-		return nil, fn(sc, db.Collection("project_members"))
+		return nil, fn(sc, db.Collection(members))
 	})
 	return err
 }
@@ -688,12 +705,23 @@ func (m *Models) changeMembers(op string, projectID primitive.ObjectID, fn func(
 // the one about to be removed or demoted. The count is only safe from concurrent
 // changes inside changeMembers.
 func refuseLastOwner(sc mongo.SessionContext, coll *mongo.Collection, projectID primitive.ObjectID) error {
-	n, err := coll.CountDocuments(sc, bson.M{"project_id": projectID, "role": RoleOwner})
+	return refuseLastOwnerOf(sc, coll, bson.M{"project_id": projectID}, ErrLastOwner)
+}
+
+// refuseLastOwnerOf returns last unless the members matching parent include an
+// owner besides the one about to be removed or demoted. The count is only safe
+// from concurrent changes inside changeMembersOf.
+func refuseLastOwnerOf(sc mongo.SessionContext, coll *mongo.Collection, parent bson.M, last error) error {
+	owners := bson.M{"role": RoleOwner}
+	for k, v := range parent {
+		owners[k] = v
+	}
+	n, err := coll.CountDocuments(sc, owners)
 	if err != nil {
 		return fmt.Errorf("count owners: %w", err)
 	}
 	if n <= 1 {
-		return ErrLastOwner
+		return last
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"net/rpc"
 	"testing"
 	"time"
 
@@ -251,6 +252,73 @@ func TestStartupMigration_OrgOnlyDeployment(t *testing.T) {
 	assertCount(t, db, "logs", bson.M{"project_id": project.ID}, 1)
 	assertOwner(t, db, project, "dave")
 	assertCount(t, db, "project_members", bson.M{"project_id": project.ID}, 1)
+}
+
+// TestStartupMigration_DefaultOwnersLinkedAtSignIn: Logger cannot tell which
+// GitHub account a configured owner is, so the Default memberships it writes
+// carry the login alone. Each is linked to its user at their first sign-in,
+// like any membership stored before user IDs; an owner who never signs in
+// stays login-only.
+func TestStartupMigration_DefaultOwnersLinkedAtSignIn(t *testing.T) {
+	ctx := context.Background()
+	mongoURI, client := migrationMongo(t)
+	db := client.Database("logs")
+
+	seedOrphanLog(t, db)
+
+	rpcAddr := startLoggerWithOwners(t, mongoURI, "alice", "dave")
+
+	project := requireDefaultProject(t, db)
+	assertOwner(t, db, project, "alice")
+	assertOwner(t, db, project, "dave")
+	assertCount(t, db, "project_members", bson.M{"project_id": project.ID, "user_id": bson.M{"$exists": true}}, 0)
+
+	conn, err := rpc.Dial("tcp", rpcAddr)
+	if err != nil {
+		t.Fatalf("dial logger RPC: %v", err)
+	}
+	defer conn.Close()
+
+	var user data.User
+	if err := conn.Call("RPCServer.UpsertUser", data.RPCUpsertUserArgs{GithubID: 501, GithubLogin: "Alice"}, &user); err != nil {
+		t.Fatalf("sign in as Alice: %v", err)
+	}
+
+	var alice data.ProjectMember
+	if err := db.Collection("project_members").FindOne(ctx, bson.M{"project_id": project.ID, "github_login": "alice"}).Decode(&alice); err != nil {
+		t.Fatalf("alice's membership: %v", err)
+	}
+	if alice.UserID != 501 || alice.Role != data.RoleOwner {
+		t.Errorf("alice's membership after sign-in = %+v, want an owner linked to user 501", alice)
+	}
+	assertCount(t, db, "project_members", bson.M{"project_id": project.ID, "github_login": "dave", "user_id": bson.M{"$exists": false}}, 1)
+}
+
+// TestStartupMigration_OwnersNeverMatchLinkedMemberships: a membership linked
+// to a user ID is theirs whatever login it stores, so an ownerless Default's
+// owner step neither promotes it on that login nor adds a second one next to
+// it.
+func TestStartupMigration_OwnersNeverMatchLinkedMemberships(t *testing.T) {
+	ctx := context.Background()
+	mongoURI, client := migrationMongo(t)
+	db := client.Database("logs")
+
+	seedOrphanLog(t, db)
+
+	startLogger(t, mongoURI, "")
+
+	project := requireDefaultProject(t, db)
+	if _, err := db.Collection("project_members").InsertOne(ctx, bson.M{
+		"project_id": project.ID, "user_id": int64(9), "github_login": "erin", "role": data.RoleMember, "created_at": time.Now(),
+	}); err != nil {
+		t.Fatalf("seed linked member: %v", err)
+	}
+
+	startLoggerWithOwners(t, mongoURI, "alice", "erin")
+
+	assertOwner(t, db, project, "alice")
+	assertCount(t, db, "project_members", bson.M{"project_id": project.ID}, 2)
+	assertCount(t, db, "project_members", bson.M{"project_id": project.ID, "user_id": int64(9), "role": data.RoleMember}, 1)
 }
 
 // TestStartupMigration_NormalizesMemberLogins seeds memberships written before

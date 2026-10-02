@@ -429,8 +429,10 @@ func (r *RPCServer) ListMembers(args *data.ProjectArgs, reply *[]data.ProjectMem
 // is only what they were called when they last signed in.
 
 // UpsertUser records a sign-in: it creates the user with this GitHub ID, or
-// refreshes the login and email of the existing one, and replies with the user
-// as stored.
+// refreshes the login and email of the existing one, links the memberships
+// stored before user IDs under their login to them (data.LinkMemberships), and
+// replies with the user as stored. A failure in either step fails the sign-in;
+// both are idempotent, so the next one finishes the job.
 func (r *RPCServer) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) error {
 	log.Printf("Upserting user %d (%s)", args.GithubID, args.GithubLogin)
 	user, err := r.models.UpsertUser(args.GithubID, args.GithubLogin, args.Email)
@@ -438,6 +440,17 @@ func (r *RPCServer) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) e
 		log.Println("Error upserting user:", err)
 		return err
 	}
+
+	links, err := r.models.LinkMemberships(user.GithubID, user.GithubLogin)
+	if err != nil {
+		log.Println("Error linking memberships:", err)
+		return err
+	}
+	if links.Linked > 0 || links.Merged > 0 {
+		log.Printf("Linked memberships of %s to user %d: linked=%d merged=%d",
+			user.GithubLogin, user.GithubID, links.Linked, links.Merged)
+	}
+
 	*reply = *user
 	return nil
 }

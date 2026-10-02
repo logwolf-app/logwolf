@@ -129,7 +129,11 @@ added.
 
 Role changes and removals name the member by the membership's `id`; the login
 in the form only words the message. The "you" badge goes by user ID, or, for a
-membership stored before user IDs, by login, as the broker matches it.
+membership stored before user IDs, by login, as the broker matches it. Such a
+membership, with no `user_id`, also carries a "not yet linked" badge: the logger
+links it to whoever next signs in under its login, and until then the login is
+all that decides who has it. One whose holder never signs in again stays that
+way until an owner removes it.
 
 Org membership is asked with the inviting owner's own GitHub token, kept from
 sign-in. GitHub shows private members only to someone in the org, so an owner in

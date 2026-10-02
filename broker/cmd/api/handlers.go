@@ -434,7 +434,7 @@ func (app *Config) ListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	defer client.Close()
 
-	args := data.RPCUserProjectsArgs{GithubLogin: userLoginFromContext(r)}
+	args := data.RPCUserProjectsArgs{UserID: userIDFromContext(r), GithubLogin: userLoginFromContext(r)}
 	var projects []data.UserProject
 	if err := client.Call("RPCServer.ListUserProjects", &args, &projects); err != nil {
 		app.rpcErrorJSON(w, err, nil)
@@ -477,7 +477,7 @@ func (app *Config) CreateProject(w http.ResponseWriter, r *http.Request) {
 	// in one transaction, so a failure leaves no project nobody can reach.
 	// Slugs are not unique, so there is no collision to report.
 	var project data.Project
-	args := data.RPCCreateProjectArgs{Name: body.Name, Slug: body.Slug, Owner: userLoginFromContext(r)}
+	args := data.RPCCreateProjectArgs{Name: body.Name, Slug: body.Slug, OwnerID: userIDFromContext(r), Owner: userLoginFromContext(r)}
 	if err := client.Call("RPCServer.CreateProject", &args, &project); err != nil {
 		app.rpcErrorJSON(w, err, nil)
 		return
@@ -489,22 +489,16 @@ func (app *Config) CreateProject(w http.ResponseWriter, r *http.Request) {
 // --- Users ---
 
 // UpsertCurrentUser records a sign-in. The dashboard calls it once GitHub has
-// said who the user is: the body carries their numeric GitHub ID, which survives
-// a rename, and their public email; the login is the caller's, from
-// X-User-Login. It creates the user or refreshes their login and email, and
-// answers the user as stored.
+// said who the user is: the caller's numeric GitHub ID, which survives a
+// rename, and login come from X-User-ID and X-User-Login like on every
+// dashboard route, and the body carries their public email. It creates the user
+// or refreshes their login and email, and answers the user as stored.
 func (app *Config) UpsertCurrentUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		GithubID int64  `json:"github_id"`
-		Email    string `json:"email"`
+		Email string `json:"email"`
 	}
 	if err := app.readJSON(w, r, &body); err != nil {
 		app.errorJSON(w, err)
-		return
-	}
-
-	if body.GithubID <= 0 {
-		app.errorJSON(w, fmt.Errorf("github_id must be a positive integer"), http.StatusBadRequest)
 		return
 	}
 
@@ -515,7 +509,7 @@ func (app *Config) UpsertCurrentUser(w http.ResponseWriter, r *http.Request) {
 	defer client.Close()
 
 	var user data.User
-	args := data.RPCUpsertUserArgs{GithubID: body.GithubID, GithubLogin: userLoginFromContext(r), Email: body.Email}
+	args := data.RPCUpsertUserArgs{GithubID: userIDFromContext(r), GithubLogin: userLoginFromContext(r), Email: body.Email}
 	if err := client.Call("RPCServer.UpsertUser", &args, &user); err != nil {
 		app.rpcErrorJSON(w, err, nil)
 		return
@@ -592,12 +586,17 @@ func (app *Config) ListProjectMembers(w http.ResponseWriter, r *http.Request) {
 	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Message: "OK!", Data: members})
 }
 
+// AddProjectMember adds a user to the project. Invites name a login, which the
+// dashboard resolves to a GitHub user ID through GitHub's API before it calls
+// here: the body carries both, and the membership belongs to the ID, with the
+// login kept for display.
 func (app *Config) AddProjectMember(w http.ResponseWriter, r *http.Request) {
 	p := projectFromContext(r)
 
 	var body struct {
-		Login string `json:"login"`
-		Role  string `json:"role"`
+		Login  string `json:"login"`
+		UserID int64  `json:"user_id"`
+		Role   string `json:"role"`
 	}
 	if err := app.readJSON(w, r, &body); err != nil {
 		app.errorJSON(w, err)
@@ -609,6 +608,10 @@ func (app *Config) AddProjectMember(w http.ResponseWriter, r *http.Request) {
 		app.errorJSON(w, fmt.Errorf("login is required"), http.StatusBadRequest)
 		return
 	}
+	if body.UserID <= 0 {
+		app.errorJSON(w, fmt.Errorf("user_id must be a positive integer"), http.StatusBadRequest)
+		return
+	}
 	if !data.ValidRole(body.Role) {
 		app.errorJSON(w, fmt.Errorf("invalid role"), http.StatusBadRequest)
 		return
@@ -617,10 +620,11 @@ func (app *Config) AddProjectMember(w http.ResponseWriter, r *http.Request) {
 	var reply string
 	if err := p.client.Call("RPCServer.AddMember", &data.RPCAddMemberArgs{
 		ProjectID:   p.id,
+		UserID:      body.UserID,
 		GithubLogin: login,
 		Role:        body.Role,
 	}, &reply); err != nil {
-		// A login is unique within a project, so a second add collides.
+		// A user, and a login, is unique within a project, so a second add collides.
 		app.rpcErrorJSON(w, err, rpcErrorMessages{
 			rpcErrDuplicate: fmt.Sprintf("%s is already a member of this project", login),
 			rpcErrNotFound:  "project not found",
@@ -631,14 +635,16 @@ func (app *Config) AddProjectMember(w http.ResponseWriter, r *http.Request) {
 	app.writeJSON(w, http.StatusCreated, jsonResponse{Error: false, Message: "Member added."})
 }
 
+// RemoveProjectMember removes the membership named in the path by its own id,
+// which the member listing returns. It names one row whether or not the
+// membership is linked to a user yet; one of another project is not found.
 func (app *Config) RemoveProjectMember(w http.ResponseWriter, r *http.Request) {
 	p := projectFromContext(r)
-	login := data.NormalizeGithubLogin(chi.URLParam(r, "login"))
 
 	var reply string
 	if err := p.client.Call("RPCServer.RemoveMember", &data.RPCRemoveMemberArgs{
-		ProjectID:   p.id,
-		GithubLogin: login,
+		ProjectID: p.id,
+		MemberID:  chi.URLParam(r, "memberID"),
 	}, &reply); err != nil {
 		app.rpcErrorJSON(w, err, rpcErrorMessages{
 			rpcErrLastOwner: "cannot remove the last owner",
@@ -650,12 +656,12 @@ func (app *Config) RemoveProjectMember(w http.ResponseWriter, r *http.Request) {
 	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Message: "Member removed."})
 }
 
-// UpdateProjectMemberRole promotes or demotes an existing member. Together with
-// a self-demotion it is how an owner hands a project over, so demoting yourself
+// UpdateProjectMemberRole promotes or demotes an existing member, named in the
+// path by their membership's id like in RemoveProjectMember. Together with a
+// self-demotion it is how an owner hands a project over, so demoting yourself
 // is allowed as long as another owner remains.
 func (app *Config) UpdateProjectMemberRole(w http.ResponseWriter, r *http.Request) {
 	p := projectFromContext(r)
-	login := data.NormalizeGithubLogin(chi.URLParam(r, "login"))
 
 	var body struct {
 		Role string `json:"role"`
@@ -671,9 +677,9 @@ func (app *Config) UpdateProjectMemberRole(w http.ResponseWriter, r *http.Reques
 
 	var reply string
 	if err := p.client.Call("RPCServer.UpdateMemberRole", &data.RPCUpdateMemberRoleArgs{
-		ProjectID:   p.id,
-		GithubLogin: login,
-		Role:        body.Role,
+		ProjectID: p.id,
+		MemberID:  chi.URLParam(r, "memberID"),
+		Role:      body.Role,
 	}, &reply); err != nil {
 		app.rpcErrorJSON(w, err, rpcErrorMessages{
 			rpcErrLastOwner: "cannot demote the last owner",

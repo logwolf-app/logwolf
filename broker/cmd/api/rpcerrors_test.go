@@ -43,7 +43,7 @@ func TestAddProjectMember_ExistingMemberIsConflict(t *testing.T) {
 	// "Member-A" is stored as member-a, so it collides like the exact login does.
 	for _, login := range []string{"member-a", "Member-A"} {
 		w := do(handler, internalRequest(http.MethodPost, "/projects/"+projAlpha+"/members", "owner-a",
-			map[string]string{"login": login, "role": data.RoleMember}))
+			map[string]any{"login": login, "user_id": testUserID(login), "role": data.RoleMember}))
 		if w.Code != http.StatusConflict {
 			t.Errorf("add %s again: got %d, want 409 (body: %s)", login, w.Code, w.Body.String())
 		}
@@ -126,9 +126,9 @@ func TestProjectRoutes_MalformedIDIsNotFound(t *testing.T) {
 		{http.MethodPatch, "/projects/" + bad, map[string]string{"name": "X", "slug": "x"}},
 		{http.MethodDelete, "/projects/" + bad, nil},
 		{http.MethodGet, "/projects/" + bad + "/members", nil},
-		{http.MethodPost, "/projects/" + bad + "/members", map[string]string{"login": "someone", "role": data.RoleMember}},
-		{http.MethodPatch, "/projects/" + bad + "/members/member-a", map[string]string{"role": data.RoleOwner}},
-		{http.MethodDelete, "/projects/" + bad + "/members/member-a", nil},
+		{http.MethodPost, "/projects/" + bad + "/members", map[string]any{"login": "someone", "user_id": testUserID("someone"), "role": data.RoleMember}},
+		{http.MethodPatch, memberPath(bad, "member-a"), map[string]string{"role": data.RoleOwner}},
+		{http.MethodDelete, memberPath(bad, "member-a"), nil},
 		{http.MethodGet, "/projects/" + bad + "/logs", nil},
 		{http.MethodPost, "/projects/" + bad + "/logs", map[string]string{"name": "e", "data": "{}", "severity": "info"}},
 		{http.MethodGet, "/projects/" + bad + "/logs/" + alphaLogID, nil},
@@ -154,7 +154,7 @@ func TestProjectRoutes_MalformedIDIsNotFound(t *testing.T) {
 func TestRemoveProjectMember_UnknownMemberIsNotFound(t *testing.T) {
 	handler, _ := newInternalTestServer(t)
 
-	w := do(handler, internalRequest(http.MethodDelete, "/projects/"+projAlpha+"/members/ghost", "owner-a", nil))
+	w := do(handler, internalRequest(http.MethodDelete, memberPath(projAlpha, "ghost"), "owner-a", nil))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("remove a non-member: got %d, want 404 (body: %s)", w.Code, w.Body.String())
 	}

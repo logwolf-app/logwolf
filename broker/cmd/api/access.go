@@ -62,9 +62,11 @@ func (app *Config) dialLogger(w http.ResponseWriter) (*rpc.Client, bool) {
 //
 // One RPC answers both questions, whether the project exists and what the
 // caller's role in it is, so a denied caller costs no more than an allowed one.
+// The caller is their GitHub user ID; the login only finds memberships stored
+// before user IDs, which have none (data.MemberFilter).
 func (app *Config) authorizeProject(w http.ResponseWriter, r *http.Request, client *rpc.Client, projectID string, need accessLevel) (string, bool) {
 	var access data.ProjectAccess
-	args := data.RPCProjectAccessArgs{ProjectID: projectID, GithubLogin: userLoginFromContext(r)}
+	args := data.RPCProjectAccessArgs{ProjectID: projectID, UserID: userIDFromContext(r), GithubLogin: userLoginFromContext(r)}
 	if err := client.Call("RPCServer.ProjectAccess", &args, &access); err != nil {
 		app.rpcErrorJSON(w, err, projectNotFound)
 		return "", false

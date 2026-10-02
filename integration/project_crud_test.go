@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -79,11 +80,11 @@ func TestGetProject_NotFound(t *testing.T) {
 func TestProjectSlugsAreNotUnique(t *testing.T) {
 	m := setupProjectModels(t)
 
-	first, err := m.CreateProjectWithOwner(data.Project{Name: "App", Slug: "app"}, "alice")
+	first, err := m.CreateProjectWithOwner(data.Project{Name: "App", Slug: "app"}, testUserID("alice"), "alice")
 	if err != nil {
 		t.Fatalf("first CreateProjectWithOwner: %v", err)
 	}
-	second, err := m.CreateProjectWithOwner(data.Project{Name: "App", Slug: "app"}, "bob")
+	second, err := m.CreateProjectWithOwner(data.Project{Name: "App", Slug: "app"}, testUserID("bob"), "bob")
 	if err != nil {
 		t.Fatalf("second CreateProjectWithOwner with the same slug: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestProjectSlugsAreNotUnique(t *testing.T) {
 
 	// Default is an ordinary slug too: the migration's project is found by its
 	// flag, never by this.
-	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Default", Slug: data.DefaultProjectSlug}, "carol"); err != nil {
+	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Default", Slug: data.DefaultProjectSlug}, testUserID("carol"), "carol"); err != nil {
 		t.Errorf("CreateProjectWithOwner with slug %q: %v", data.DefaultProjectSlug, err)
 	}
 }
@@ -133,7 +134,7 @@ func TestRenameProject_NotFound(t *testing.T) {
 func TestCreateProjectWithOwner(t *testing.T) {
 	m := setupProjectModels(t)
 
-	p, err := m.CreateProjectWithOwner(data.Project{Name: "Fresh", Slug: "fresh"}, "  JDoe ")
+	p, err := m.CreateProjectWithOwner(data.Project{Name: "Fresh", Slug: "fresh"}, 583231, "  JDoe ")
 	if err != nil {
 		t.Fatalf("CreateProjectWithOwner: %v", err)
 	}
@@ -150,8 +151,8 @@ func TestCreateProjectWithOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProjectMembers: %v", err)
 	}
-	if len(members) != 1 || members[0].GithubLogin != "jdoe" || members[0].Role != data.RoleOwner {
-		t.Errorf("members = %+v, want jdoe as the only owner", members)
+	if len(members) != 1 || members[0].UserID != 583231 || members[0].GithubLogin != "jdoe" || members[0].Role != data.RoleOwner {
+		t.Errorf("members = %+v, want user 583231 (jdoe) as the only owner", members)
 	}
 }
 
@@ -159,8 +160,11 @@ func TestCreateProjectWithOwner_RequiresOwner(t *testing.T) {
 	m := setupProjectModels(t)
 	db := testMongo(t, sharedModelsMongo(t)).Database("logs")
 
-	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Ownerless", Slug: "ownerless"}, " "); err == nil {
+	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Ownerless", Slug: "ownerless"}, 583231, " "); err == nil {
 		t.Fatal("CreateProjectWithOwner with a blank login: want an error, got nil")
+	}
+	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Ownerless", Slug: "ownerless"}, 0, "jdoe"); err == nil {
+		t.Fatal("CreateProjectWithOwner without a user ID: want an error, got nil")
 	}
 	if n := countDocs(t, db.Collection("projects"), bson.M{}); n != 0 {
 		t.Errorf("projects: %d created without an owner, want 0", n)
@@ -179,7 +183,7 @@ func TestCreateProjectWithOwner_RollsBackWhenOwnerInsertFails(t *testing.T) {
 	// non-transient error, so WithTransaction gives up instead of retrying.
 	setFailPoint(t, client, bson.M{"skip": 1}, bson.M{"failCommands": bson.A{"insert"}, "errorCode": 2})
 
-	_, err := m.CreateProjectWithOwner(data.Project{Name: "Orphan", Slug: "orphan"}, "alice")
+	_, err := m.CreateProjectWithOwner(data.Project{Name: "Orphan", Slug: "orphan"}, testUserID("alice"), "alice")
 	clearFailPoint(t, client)
 
 	if err == nil || !strings.Contains(err.Error(), "owner") {
@@ -377,7 +381,7 @@ func TestRemoveProjectMember_LastOwner(t *testing.T) {
 	p, _ := m.InsertProject(data.Project{Name: "Solo", Slug: "solo"})
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "only-owner", Role: data.RoleOwner})
 
-	err := m.RemoveProjectMember(p.ID, "only-owner")
+	err := m.RemoveProjectMember(p.ID, memberID(t, m, p.ID, "only-owner"))
 	if !errors.Is(err, data.ErrLastOwner) {
 		t.Errorf("RemoveProjectMember last owner: want ErrLastOwner, got %v", err)
 	}
@@ -390,7 +394,7 @@ func TestRemoveProjectMember_SecondOwnerAllowed(t *testing.T) {
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "owner1", Role: data.RoleOwner})
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "owner2", Role: data.RoleOwner})
 
-	if err := m.RemoveProjectMember(p.ID, "owner2"); err != nil {
+	if err := m.RemoveProjectMember(p.ID, memberID(t, m, p.ID, "owner2")); err != nil {
 		t.Errorf("RemoveProjectMember second owner: %v", err)
 	}
 }
@@ -402,7 +406,7 @@ func TestRemoveProjectMember_RegularMember(t *testing.T) {
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "owner", Role: data.RoleOwner})
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "bob", Role: data.RoleMember})
 
-	if err := m.RemoveProjectMember(p.ID, "bob"); err != nil {
+	if err := m.RemoveProjectMember(p.ID, memberID(t, m, p.ID, "bob")); err != nil {
 		t.Errorf("RemoveProjectMember member: %v", err)
 	}
 }
@@ -419,22 +423,20 @@ func TestRemoveProjectMember_ConcurrentOwners(t *testing.T) {
 		if err != nil {
 			t.Fatalf("round %d: InsertProject: %v", round, err)
 		}
-		owners := []string{"owner-a", "owner-b"}
-		for _, login := range owners {
-			if _, err := m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: login, Role: data.RoleOwner}); err != nil {
-				t.Fatalf("round %d: InsertProjectMember %s: %v", round, login, err)
-			}
+		var owners []primitive.ObjectID
+		for _, login := range []string{"owner-a", "owner-b"} {
+			owners = append(owners, addMember(t, m, p.ID, login, data.RoleOwner))
 		}
 
 		start := make(chan struct{})
 		errs := make([]error, len(owners))
 		var wg sync.WaitGroup
-		for i, login := range owners {
+		for i, owner := range owners {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				<-start
-				errs[i] = m.RemoveProjectMember(p.ID, login)
+				errs[i] = m.RemoveProjectMember(p.ID, owner)
 			}()
 		}
 		close(start)
@@ -470,10 +472,39 @@ func TestRemoveProjectMember_NotFound(t *testing.T) {
 
 	p, _ := m.InsertProject(data.Project{Name: "NF", Slug: "nf"})
 
-	err := m.RemoveProjectMember(p.ID, "ghost")
+	err := m.RemoveProjectMember(p.ID, newOID())
 	if !errors.Is(err, mongo.ErrNoDocuments) {
 		t.Errorf("RemoveProjectMember missing: want mongo.ErrNoDocuments, got %v", err)
 	}
+}
+
+// addMember makes login's test user (testUserID) a member of the project, and
+// returns the membership's id.
+func addMember(t *testing.T, m data.Models, projectID primitive.ObjectID, login, role string) primitive.ObjectID {
+	t.Helper()
+
+	pm, err := m.InsertProjectMember(data.ProjectMember{ProjectID: projectID, UserID: testUserID(login), GithubLogin: login, Role: role})
+	if err != nil {
+		t.Fatalf("InsertProjectMember %s: %v", login, err)
+	}
+	return pm.ID
+}
+
+// memberID returns the id of the project's membership listed under login.
+func memberID(t *testing.T, m data.Models, projectID primitive.ObjectID, login string) primitive.ObjectID {
+	t.Helper()
+
+	members, err := m.GetProjectMembers(projectID)
+	if err != nil {
+		t.Fatalf("GetProjectMembers: %v", err)
+	}
+	for _, mb := range members {
+		if mb.GithubLogin == login {
+			return mb.ID
+		}
+	}
+	t.Fatalf("no member %s in project %s: %+v", login, projectID.Hex(), members)
+	return primitive.NilObjectID
 }
 
 // memberRoles maps each member of the project to their role.
@@ -500,10 +531,10 @@ func TestUpdateProjectMemberRole_TransferOwnership(t *testing.T) {
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "old-owner", Role: data.RoleOwner})
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "heir", Role: data.RoleMember})
 
-	if err := m.UpdateProjectMemberRole(p.ID, "heir", data.RoleOwner); err != nil {
+	if err := m.UpdateProjectMemberRole(p.ID, memberID(t, m, p.ID, "heir"), data.RoleOwner); err != nil {
 		t.Fatalf("promote heir: %v", err)
 	}
-	if err := m.UpdateProjectMemberRole(p.ID, "old-owner", data.RoleMember); err != nil {
+	if err := m.UpdateProjectMemberRole(p.ID, memberID(t, m, p.ID, "old-owner"), data.RoleMember); err != nil {
 		t.Fatalf("demote old-owner: %v", err)
 	}
 
@@ -520,7 +551,7 @@ func TestUpdateProjectMemberRole_LastOwner(t *testing.T) {
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "only-owner", Role: data.RoleOwner})
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "bob", Role: data.RoleMember})
 
-	err := m.UpdateProjectMemberRole(p.ID, "only-owner", data.RoleMember)
+	err := m.UpdateProjectMemberRole(p.ID, memberID(t, m, p.ID, "only-owner"), data.RoleMember)
 	if !errors.Is(err, data.ErrLastOwner) {
 		t.Errorf("demote last owner: want ErrLastOwner, got %v", err)
 	}
@@ -529,25 +560,30 @@ func TestUpdateProjectMemberRole_LastOwner(t *testing.T) {
 	}
 
 	// Setting the role the last owner already holds is not a demotion.
-	if err := m.UpdateProjectMemberRole(p.ID, "only-owner", data.RoleOwner); err != nil {
+	if err := m.UpdateProjectMemberRole(p.ID, memberID(t, m, p.ID, "only-owner"), data.RoleOwner); err != nil {
 		t.Errorf("owner to owner: %v", err)
 	}
 }
 
-// Memberships are stored lowercase, so the login a caller passes in any casing
-// has to find the row.
-func TestUpdateProjectMemberRole_CaseInsensitiveLogin(t *testing.T) {
+// A membership id names a row of one project: another project's is not found,
+// and changes nothing there.
+func TestMemberChanges_StayInTheirProject(t *testing.T) {
 	m := setupProjectModels(t)
 
-	p, _ := m.InsertProject(data.Project{Name: "Case", Slug: "case"})
-	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "owner", Role: data.RoleOwner})
-	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "jdoe", Role: data.RoleMember})
+	p, _ := m.InsertProject(data.Project{Name: "Mine", Slug: "mine"})
+	other, _ := m.InsertProject(data.Project{Name: "Theirs", Slug: "theirs"})
+	addMember(t, m, p.ID, "owner", data.RoleOwner)
+	addMember(t, m, other.ID, "their-owner", data.RoleOwner)
+	theirs := addMember(t, m, other.ID, "their-member", data.RoleMember)
 
-	if err := m.UpdateProjectMemberRole(p.ID, "JDoe", data.RoleOwner); err != nil {
-		t.Fatalf("promote JDoe: %v", err)
+	if err := m.UpdateProjectMemberRole(p.ID, theirs, data.RoleOwner); !errors.Is(err, mongo.ErrNoDocuments) {
+		t.Errorf("promote another project's member: want mongo.ErrNoDocuments, got %v", err)
 	}
-	if roles := memberRoles(t, m, p.ID); roles["jdoe"] != data.RoleOwner {
-		t.Errorf("after promoting JDoe: got %v", roles)
+	if err := m.RemoveProjectMember(p.ID, theirs); !errors.Is(err, mongo.ErrNoDocuments) {
+		t.Errorf("remove another project's member: want mongo.ErrNoDocuments, got %v", err)
+	}
+	if roles := memberRoles(t, m, other.ID); roles["their-member"] != data.RoleMember {
+		t.Errorf("the other project's members changed: %v", roles)
 	}
 }
 
@@ -556,7 +592,7 @@ func TestUpdateProjectMemberRole_NotFound(t *testing.T) {
 
 	p, _ := m.InsertProject(data.Project{Name: "NF", Slug: "nf"})
 
-	err := m.UpdateProjectMemberRole(p.ID, "ghost", data.RoleOwner)
+	err := m.UpdateProjectMemberRole(p.ID, newOID(), data.RoleOwner)
 	if !errors.Is(err, mongo.ErrNoDocuments) {
 		t.Errorf("UpdateProjectMemberRole missing: want mongo.ErrNoDocuments, got %v", err)
 	}
@@ -568,7 +604,7 @@ func TestUpdateProjectMemberRole_InvalidRole(t *testing.T) {
 	p, _ := m.InsertProject(data.Project{Name: "Bad", Slug: "bad"})
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "bob", Role: data.RoleMember})
 
-	if err := m.UpdateProjectMemberRole(p.ID, "bob", "admin"); err == nil {
+	if err := m.UpdateProjectMemberRole(p.ID, memberID(t, m, p.ID, "bob"), "admin"); err == nil {
 		t.Error("UpdateProjectMemberRole admin: expected an error, got nil")
 	}
 	if roles := memberRoles(t, m, p.ID); roles["bob"] != data.RoleMember {
@@ -589,19 +625,15 @@ func TestUpdateProjectMemberRole_ConcurrentDemotion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("round %d: InsertProject: %v", round, err)
 		}
-		owners := []string{"owner-a", "owner-b"}
-		for _, login := range owners {
-			if _, err := m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: login, Role: data.RoleOwner}); err != nil {
-				t.Fatalf("round %d: InsertProjectMember %s: %v", round, login, err)
-			}
-		}
+		ownerA := addMember(t, m, p.ID, "owner-a", data.RoleOwner)
+		ownerB := addMember(t, m, p.ID, "owner-b", data.RoleOwner)
 
 		changes := []func() error{
-			func() error { return m.UpdateProjectMemberRole(p.ID, "owner-a", data.RoleMember) },
-			func() error { return m.UpdateProjectMemberRole(p.ID, "owner-b", data.RoleMember) },
+			func() error { return m.UpdateProjectMemberRole(p.ID, ownerA, data.RoleMember) },
+			func() error { return m.UpdateProjectMemberRole(p.ID, ownerB, data.RoleMember) },
 		}
 		if round%2 == 1 {
-			changes[1] = func() error { return m.RemoveProjectMember(p.ID, "owner-b") }
+			changes[1] = func() error { return m.RemoveProjectMember(p.ID, ownerB) }
 		}
 
 		start := make(chan struct{})
@@ -703,14 +735,98 @@ func TestMemberRole(t *testing.T) {
 	m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "olive", Role: data.RoleOwner})
 
 	for login, want := range map[string]string{"carol": data.RoleMember, "olive": data.RoleOwner, "stranger": ""} {
-		role, err := m.MemberRole(p.ID, login)
+		role, err := m.MemberRole(p.ID, testUserID(login), login)
 		if err != nil || role != want {
 			t.Errorf("MemberRole %s: role=%q err=%v, want %q", login, role, err, want)
 		}
 	}
 
-	if role, err := m.MemberRole(primitive.NewObjectID(), "carol"); err != nil || role != "" {
+	if role, err := m.MemberRole(primitive.NewObjectID(), testUserID("carol"), "carol"); err != nil || role != "" {
 		t.Errorf("MemberRole in a project that does not exist: role=%q err=%v, want none", role, err)
+	}
+}
+
+// TestMemberRole_ByUserID: a membership linked to a user is theirs under any
+// login they sign in with, and nobody else's, even someone who takes the login
+// it was added under. A membership stored before user IDs has a login alone,
+// and is matched by it.
+func TestMemberRole_ByUserID(t *testing.T) {
+	m := setupProjectModels(t)
+
+	p, _ := m.InsertProject(data.Project{Name: "Linked", Slug: "linked"})
+	addMember(t, m, p.ID, "erin", data.RoleOwner)
+	if _, err := m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "frank", Role: data.RoleMember}); err != nil {
+		t.Fatalf("InsertProjectMember frank, unlinked: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		userID int64
+		login  string
+		want   string
+	}{
+		{"erin", testUserID("erin"), "erin", data.RoleOwner},
+		{"erin after a rename", testUserID("erin"), "erin-renamed", data.RoleOwner},
+		{"another account with erin's login", testUserID("erin") + 1, "erin", ""},
+		{"no user ID with erin's login", 0, "erin", ""},
+		{"unlinked frank, by login", testUserID("frank"), "Frank", data.RoleMember},
+		{"unlinked frank's login, any user ID", 42, "frank", data.RoleMember},
+	}
+	for _, tc := range cases {
+		role, err := m.MemberRole(p.ID, tc.userID, tc.login)
+		if err != nil || role != tc.want {
+			t.Errorf("%s: role=%q err=%v, want %q", tc.name, role, err, tc.want)
+		}
+	}
+
+	projects, err := m.GetProjectsForUser(testUserID("erin"), "erin-renamed")
+	if err != nil || len(projects) != 1 || projects[0].Role != data.RoleOwner {
+		t.Errorf("GetProjectsForUser erin after a rename: %+v, err=%v, want the project as owner", projects, err)
+	}
+	projects, err = m.GetProjectsForUser(testUserID("erin")+1, "erin")
+	if err != nil || len(projects) != 0 {
+		t.Errorf("GetProjectsForUser another account with erin's login: %+v, err=%v, want none", projects, err)
+	}
+}
+
+// TestInsertProjectMember_OneMembershipPerUser: a user is a member of a project
+// once, whatever login they are added under.
+func TestInsertProjectMember_OneMembershipPerUser(t *testing.T) {
+	m := setupProjectModels(t)
+
+	p, _ := m.InsertProject(data.Project{Name: "Once", Slug: "once"})
+	addMember(t, m, p.ID, "erin", data.RoleMember)
+
+	_, err := m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, UserID: testUserID("erin"), GithubLogin: "erin-renamed", Role: data.RoleOwner})
+	if !mongo.IsDuplicateKeyError(err) {
+		t.Errorf("InsertProjectMember erin again under a new login: err=%v, want a duplicate key error", err)
+	}
+
+	// Another project is another membership.
+	other, _ := m.InsertProject(data.Project{Name: "Twice", Slug: "twice"})
+	addMember(t, m, other.ID, "erin", data.RoleMember)
+}
+
+// TestGetProjectMembers_ShowsTheLoginOfTheLastSignIn: a linked member is listed
+// under the login they last signed in with, so a GitHub rename shows; the
+// membership keeps the login it was added under.
+func TestGetProjectMembers_ShowsTheLoginOfTheLastSignIn(t *testing.T) {
+	m := setupProjectModels(t)
+
+	p, _ := m.InsertProject(data.Project{Name: "Renames", Slug: "renames"})
+	addMember(t, m, p.ID, "erin", data.RoleOwner)
+	addMember(t, m, p.ID, "never-signed-in", data.RoleMember)
+	if _, err := m.InsertProjectMember(data.ProjectMember{ProjectID: p.ID, GithubLogin: "unlinked", Role: data.RoleMember}); err != nil {
+		t.Fatalf("InsertProjectMember unlinked: %v", err)
+	}
+	if _, err := m.UpsertUser(testUserID("erin"), "Erin-Renamed", ""); err != nil {
+		t.Fatalf("UpsertUser: %v", err)
+	}
+
+	roles := memberRoles(t, m, p.ID)
+	want := map[string]string{"erin-renamed": data.RoleOwner, "never-signed-in": data.RoleMember, "unlinked": data.RoleMember}
+	if !maps.Equal(roles, want) {
+		t.Errorf("members = %v, want %v", roles, want)
 	}
 }
 
@@ -727,12 +843,13 @@ func TestProjectMembers_CaseInsensitiveLogin(t *testing.T) {
 		t.Fatalf("InsertProjectMember: %v", err)
 	}
 
-	role, err := m.MemberRole(p.ID, "JDoe")
+	// The membership was added before user IDs, so it is matched by login.
+	role, err := m.MemberRole(p.ID, testUserID("jdoe"), "JDoe")
 	if err != nil || role != data.RoleMember {
 		t.Errorf("MemberRole JDoe: role=%q err=%v, want the membership added as jdoe", role, err)
 	}
 
-	projects, err := m.GetProjectsForUser("JDoe")
+	projects, err := m.GetProjectsForUser(testUserID("jdoe"), "JDoe")
 	if err != nil || len(projects) != 1 {
 		t.Errorf("GetProjectsForUser JDoe: got %d projects, err=%v, want 1", len(projects), err)
 	}
@@ -742,11 +859,11 @@ func TestProjectMembers_CaseInsensitiveLogin(t *testing.T) {
 		t.Errorf("InsertProjectMember JDOE next to jdoe: err=%v, want a duplicate key error", err)
 	}
 
-	if err := m.RemoveProjectMember(p.ID, "JDoe"); err != nil {
-		t.Fatalf("RemoveProjectMember JDoe: %v", err)
+	if err := m.RemoveProjectMember(p.ID, memberID(t, m, p.ID, "jdoe")); err != nil {
+		t.Fatalf("RemoveProjectMember jdoe: %v", err)
 	}
-	if role, _ := m.MemberRole(p.ID, "jdoe"); role != "" {
-		t.Error("jdoe is still a member after removing JDoe")
+	if role, _ := m.MemberRole(p.ID, testUserID("jdoe"), "JDoe"); role != "" {
+		t.Error("JDoe is still a member after removing jdoe")
 	}
 }
 
@@ -757,10 +874,10 @@ func TestGetProjectsForUser(t *testing.T) {
 	p2, _ := m.InsertProject(data.Project{Name: "P2", Slug: "p2"})
 	m.InsertProject(data.Project{Name: "P3", Slug: "p3"}) // dave is NOT a member
 
-	m.InsertProjectMember(data.ProjectMember{ProjectID: p1.ID, GithubLogin: "dave", Role: data.RoleOwner})
-	m.InsertProjectMember(data.ProjectMember{ProjectID: p2.ID, GithubLogin: "dave", Role: data.RoleMember})
+	addMember(t, m, p1.ID, "dave", data.RoleOwner)
+	addMember(t, m, p2.ID, "dave", data.RoleMember)
 
-	projects, err := m.GetProjectsForUser("dave")
+	projects, err := m.GetProjectsForUser(testUserID("dave"), "dave")
 	if err != nil {
 		t.Fatalf("GetProjectsForUser: %v", err)
 	}
@@ -785,7 +902,7 @@ func TestGetProjectsForUser(t *testing.T) {
 func TestGetProjectsForUser_NoMemberships(t *testing.T) {
 	m := setupProjectModels(t)
 
-	projects, err := m.GetProjectsForUser("nobody")
+	projects, err := m.GetProjectsForUser(testUserID("nobody"), "nobody")
 	if err != nil {
 		t.Fatalf("GetProjectsForUser no memberships: %v", err)
 	}

@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -64,8 +67,31 @@ func newInternalTestServer(t *testing.T) (http.Handler, *fakeLogger) {
 	return app.routes(), f
 }
 
-// internalRequest builds a request carrying both headers the internal routes
-// demand. body may be nil.
+// testUserID is the GitHub user ID the tests give a login: a fixed positive
+// number per login, whatever its casing, so the dashboard's X-User-ID and the
+// fake's memberships agree without a table of users.
+func testUserID(login string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(data.NormalizeGithubLogin(login)))
+	return int64(h.Sum64()>>2) + 1
+}
+
+// testMemberID is the id of login's membership of a project in the fake, which
+// the member routes name in their path.
+func testMemberID(projectID, login string) string {
+	h := fnv.New64a()
+	h.Write([]byte(projectID + "/" + data.NormalizeGithubLogin(login)))
+	return fmt.Sprintf("feed%020x", h.Sum64())
+}
+
+// memberPath is the route of login's membership of a project.
+func memberPath(projectID, login string) string {
+	return "/projects/" + projectID + "/members/" + testMemberID(projectID, login)
+}
+
+// internalRequest builds a request carrying the headers the internal routes
+// demand: the secret and, given a login, the user, with testUserID for their
+// GitHub user ID. body may be nil.
 func internalRequest(method, target, userLogin string, body any) *http.Request {
 	var r *http.Request
 	if body == nil {
@@ -78,6 +104,7 @@ func internalRequest(method, target, userLogin string, body any) *http.Request {
 	r.Header.Set("X-Internal-Secret", internalSecret)
 	if userLogin != "" {
 		r.Header.Set("X-User-Login", userLogin)
+		r.Header.Set("X-User-ID", strconv.FormatInt(testUserID(userLogin), 10))
 	}
 	return r
 }
@@ -173,7 +200,7 @@ func TestInternalRoutes_RejectMissingUserLogin(t *testing.T) {
 		{http.MethodDelete, "/projects/" + projAlpha},
 		{http.MethodGet, "/projects/" + projAlpha + "/members"},
 		{http.MethodPost, "/projects/" + projAlpha + "/members"},
-		{http.MethodDelete, "/projects/" + projAlpha + "/members/member-a"},
+		{http.MethodDelete, memberPath(projAlpha, "member-a")},
 		{http.MethodGet, "/projects/" + projAlpha + "/logs"},
 		{http.MethodPost, "/projects/" + projAlpha + "/logs"},
 		{http.MethodGet, "/projects/" + projAlpha + "/logs/" + alphaLogID},
@@ -256,9 +283,9 @@ func TestProjectRoutes_OwnerOnly(t *testing.T) {
 	}{
 		{"rename project", http.MethodPatch, "/projects/" + projAlpha, map[string]string{"name": "Renamed", "slug": "renamed"}},
 		{"delete project", http.MethodDelete, "/projects/" + projAlpha, nil},
-		{"add member", http.MethodPost, "/projects/" + projAlpha + "/members", map[string]string{"login": "newbie", "role": data.RoleMember}},
-		{"remove member", http.MethodDelete, "/projects/" + projAlpha + "/members/member-a", nil},
-		{"change member role", http.MethodPatch, "/projects/" + projAlpha + "/members/member-a", map[string]string{"role": data.RoleOwner}},
+		{"add member", http.MethodPost, "/projects/" + projAlpha + "/members", map[string]any{"login": "newbie", "user_id": testUserID("newbie"), "role": data.RoleMember}},
+		{"remove member", http.MethodDelete, memberPath(projAlpha, "member-a"), nil},
+		{"change member role", http.MethodPatch, memberPath(projAlpha, "member-a"), map[string]string{"role": data.RoleOwner}},
 	}
 
 	for _, tc := range cases {
@@ -297,9 +324,9 @@ func TestProjectRoutes_OwnerOnlyDeniesBeforeForwarding(t *testing.T) {
 	do(handler, internalRequest(http.MethodPatch, "/projects/"+projAlpha, "member-a",
 		map[string]string{"name": "Renamed", "slug": "renamed"}))
 	do(handler, internalRequest(http.MethodPost, "/projects/"+projAlpha+"/members", "member-a",
-		map[string]string{"login": "newbie", "role": data.RoleMember}))
-	do(handler, internalRequest(http.MethodDelete, "/projects/"+projAlpha+"/members/member-a", "member-a", nil))
-	do(handler, internalRequest(http.MethodPatch, "/projects/"+projAlpha+"/members/member-a", "member-a",
+		map[string]any{"login": "newbie", "user_id": testUserID("newbie"), "role": data.RoleMember}))
+	do(handler, internalRequest(http.MethodDelete, memberPath(projAlpha, "member-a"), "member-a", nil))
+	do(handler, internalRequest(http.MethodPatch, memberPath(projAlpha, "member-a"), "member-a",
 		map[string]string{"role": data.RoleOwner}))
 
 	fake.snapshot(func(f *fakeLogger) {
@@ -325,7 +352,7 @@ func TestRemoveProjectMember_LastOwnerIsBadRequest(t *testing.T) {
 	handler, fake := newInternalTestServer(t)
 	fake.lastOwnerLogin = "owner-a"
 
-	w := do(handler, internalRequest(http.MethodDelete, "/projects/"+projAlpha+"/members/owner-a", "owner-a", nil))
+	w := do(handler, internalRequest(http.MethodDelete, memberPath(projAlpha, "owner-a"), "owner-a", nil))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("removing the last owner: got %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
@@ -336,7 +363,7 @@ func TestRemoveProjectMember_LastOwnerIsBadRequest(t *testing.T) {
 func TestUpdateProjectMemberRole_PromoteAndDemote(t *testing.T) {
 	handler, fake := newInternalTestServer(t)
 
-	w := do(handler, internalRequest(http.MethodPatch, "/projects/"+projAlpha+"/members/member-a", "owner-a",
+	w := do(handler, internalRequest(http.MethodPatch, memberPath(projAlpha, "member-a"), "owner-a",
 		map[string]string{"role": data.RoleOwner}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("promote: got %d, want 200 (body: %s)", w.Code, w.Body.String())
@@ -344,7 +371,7 @@ func TestUpdateProjectMemberRole_PromoteAndDemote(t *testing.T) {
 
 	// Now that member-a is an owner too, owner-a may step down: the two-step
 	// ownership transfer the endpoint exists for.
-	w = do(handler, internalRequest(http.MethodPatch, "/projects/"+projAlpha+"/members/owner-a", "owner-a",
+	w = do(handler, internalRequest(http.MethodPatch, memberPath(projAlpha, "owner-a"), "owner-a",
 		map[string]string{"role": data.RoleMember}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("demote self: got %d, want 200 (body: %s)", w.Code, w.Body.String())
@@ -352,8 +379,8 @@ func TestUpdateProjectMemberRole_PromoteAndDemote(t *testing.T) {
 
 	fake.snapshot(func(f *fakeLogger) {
 		want := []data.RPCUpdateMemberRoleArgs{
-			{ProjectID: projAlpha, GithubLogin: "member-a", Role: data.RoleOwner},
-			{ProjectID: projAlpha, GithubLogin: "owner-a", Role: data.RoleMember},
+			{ProjectID: projAlpha, MemberID: testMemberID(projAlpha, "member-a"), Role: data.RoleOwner},
+			{ProjectID: projAlpha, MemberID: testMemberID(projAlpha, "owner-a"), Role: data.RoleMember},
 		}
 		if len(f.roleChanges) != len(want) {
 			t.Fatalf("UpdateMemberRole calls = %v, want %v", f.roleChanges, want)
@@ -366,20 +393,36 @@ func TestUpdateProjectMemberRole_PromoteAndDemote(t *testing.T) {
 	})
 }
 
-// The login in the path reaches the logger normalized, as it does for removal:
-// memberships are stored lowercase, so "Member-A" has to find "member-a".
-func TestUpdateProjectMemberRole_NormalizesLogin(t *testing.T) {
+// Members are named by their membership's id, never by login: a login in the
+// path names no membership, and neither does another project's membership.
+func TestMemberRoutes_NameTheMembershipOfThisProject(t *testing.T) {
 	handler, fake := newInternalTestServer(t)
 
-	w := do(handler, internalRequest(http.MethodPatch, "/projects/"+projAlpha+"/members/Member-A", "owner-a",
-		map[string]string{"role": data.RoleOwner}))
-	if w.Code != http.StatusOK {
-		t.Fatalf("promote Member-A: got %d, want 200 (body: %s)", w.Code, w.Body.String())
+	for _, target := range []string{
+		"/projects/" + projAlpha + "/members/member-a",
+		"/projects/" + projAlpha + "/members/" + strconv.FormatInt(testUserID("member-a"), 10),
+		"/projects/" + projAlpha + "/members/" + testMemberID(projBeta, "owner-b"),
+	} {
+		w := do(handler, internalRequest(http.MethodPatch, target, "owner-a", map[string]string{"role": data.RoleOwner}))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("PATCH %s: got %d, want 404 (body: %s)", target, w.Code, w.Body.String())
+		}
+		if w := do(handler, internalRequest(http.MethodDelete, target, "owner-a", nil)); w.Code != http.StatusNotFound {
+			t.Errorf("DELETE %s: got %d, want 404 (body: %s)", target, w.Code, w.Body.String())
+		}
 	}
 
+	// Every membership is still there, in the role it had.
+	want := map[string]string{"owner-a": data.RoleOwner, "member-a": data.RoleMember, "owner-b": data.RoleOwner}
 	fake.snapshot(func(f *fakeLogger) {
-		if len(f.roleChanges) != 1 || f.roleChanges[0].GithubLogin != "member-a" {
-			t.Errorf("UpdateMemberRole calls = %+v, want one for member-a", f.roleChanges)
+		got := map[string]string{}
+		for _, project := range []string{projAlpha, projBeta} {
+			for _, m := range f.members[project] {
+				got[m.GithubLogin] = m.Role
+			}
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("memberships = %v, want %v", got, want)
 		}
 	})
 }
@@ -388,7 +431,7 @@ func TestUpdateProjectMemberRole_LastOwnerIsBadRequest(t *testing.T) {
 	handler, fake := newInternalTestServer(t)
 	fake.lastOwnerLogin = "owner-a"
 
-	w := do(handler, internalRequest(http.MethodPatch, "/projects/"+projAlpha+"/members/owner-a", "owner-a",
+	w := do(handler, internalRequest(http.MethodPatch, memberPath(projAlpha, "owner-a"), "owner-a",
 		map[string]string{"role": data.RoleMember}))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("demoting the last owner: got %d, want 400 (body: %s)", w.Code, w.Body.String())
@@ -402,7 +445,7 @@ func TestUpdateProjectMemberRole_InvalidRole(t *testing.T) {
 	for _, body := range []any{map[string]string{"role": "admin"}, map[string]string{}} {
 		handler, fake := newInternalTestServer(t)
 
-		w := do(handler, internalRequest(http.MethodPatch, "/projects/"+projAlpha+"/members/member-a", "owner-a", body))
+		w := do(handler, internalRequest(http.MethodPatch, memberPath(projAlpha, "member-a"), "owner-a", body))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("role %v: got %d, want 400 (body: %s)", body, w.Code, w.Body.String())
 		}
@@ -417,11 +460,129 @@ func TestUpdateProjectMemberRole_InvalidRole(t *testing.T) {
 func TestUpdateProjectMemberRole_UnknownMemberIsNotFound(t *testing.T) {
 	handler, _ := newInternalTestServer(t)
 
-	w := do(handler, internalRequest(http.MethodPatch, "/projects/"+projAlpha+"/members/ghost", "owner-a",
+	w := do(handler, internalRequest(http.MethodPatch, memberPath(projAlpha, "ghost"), "owner-a",
 		map[string]string{"role": data.RoleOwner}))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("promote a non-member: got %d, want 404 (body: %s)", w.Code, w.Body.String())
 	}
+}
+
+// --- identity: memberships belong to user IDs ---
+
+// requestAs is internalRequest as the user with this login and GitHub user ID,
+// for the tests where the two do not go together the usual way (testUserID).
+func requestAs(method, target, login string, userID int64, body any) *http.Request {
+	r := internalRequest(method, target, login, body)
+	r.Header.Set("X-User-ID", strconv.FormatInt(userID, 10))
+	return r
+}
+
+// TestProjectAccess_FollowsTheUserIDNotTheLogin: a member who renamed their
+// GitHub account keeps their access under the new login, and whoever takes the
+// old login gets none of it.
+func TestProjectAccess_FollowsTheUserIDNotTheLogin(t *testing.T) {
+	handler, _ := newInternalTestServer(t)
+	target := "/projects/" + projAlpha + "/members"
+
+	renamed := requestAs(http.MethodGet, target, "member-a-renamed", testUserID("member-a"), nil)
+	if w := do(handler, renamed); w.Code != http.StatusOK {
+		t.Errorf("member-a under a new login: got %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	impostor := requestAs(http.MethodGet, target, "member-a", testUserID("member-a")+1, nil)
+	if w := do(handler, impostor); w.Code != http.StatusForbidden {
+		t.Errorf("another account with member-a's login: got %d, want 403 (body: %s)", w.Code, w.Body.String())
+	}
+	// Owner-only checks go by the ID too.
+	owner := requestAs(http.MethodPatch, "/projects/"+projAlpha, "owner-a", testUserID("member-a"), map[string]string{"name": "Taken"})
+	if w := do(handler, owner); w.Code != http.StatusForbidden {
+		t.Errorf("member-a's ID with owner-a's login renaming the project: got %d, want 403", w.Code)
+	}
+
+	w := do(handler, requestAs(http.MethodGet, "/projects", "member-a", testUserID("member-a")+1, nil))
+	if got := decodeData[[]data.UserProject](t, w); len(got) != 0 {
+		t.Errorf("another account with member-a's login lists %d project(s), want 0: %+v", len(got), got)
+	}
+	w = do(handler, requestAs(http.MethodGet, "/projects", "member-a-renamed", testUserID("member-a"), nil))
+	if got := decodeData[[]data.UserProject](t, w); len(got) != 1 || got[0].ID.Hex() != projAlpha {
+		t.Errorf("member-a under a new login lists %+v, want alpha", got)
+	}
+}
+
+// TestProjectAccess_UnlinkedMembershipsMatchTheLogin: a membership stored before
+// user IDs has only a login, and keeps working for whoever signs in with it
+// until it is linked to a user.
+func TestProjectAccess_UnlinkedMembershipsMatchTheLogin(t *testing.T) {
+	handler, fake := newInternalTestServer(t)
+	fake.addUnlinkedMember(projBeta, "veteran", data.RoleOwner)
+
+	w := do(handler, internalRequest(http.MethodPatch, "/projects/"+projBeta, "Veteran", map[string]string{"name": "Renamed"}))
+	if w.Code != http.StatusOK {
+		t.Errorf("unlinked owner renaming the project: got %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	w = do(handler, internalRequest(http.MethodGet, "/projects", "veteran", nil))
+	if got := decodeData[[]data.UserProject](t, w); len(got) != 1 || got[0].Role != data.RoleOwner {
+		t.Errorf("unlinked owner lists %+v, want beta as owner", got)
+	}
+
+	// An owner can remove it, by its membership id like any other.
+	if w := do(handler, internalRequest(http.MethodDelete, memberPath(projBeta, "veteran"), "owner-b", nil)); w.Code != http.StatusOK {
+		t.Fatalf("remove the unlinked member: got %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	if w := do(handler, internalRequest(http.MethodGet, "/projects/"+projBeta, "veteran", nil)); w.Code != http.StatusForbidden {
+		t.Errorf("removed unlinked member: got %d, want 403", w.Code)
+	}
+}
+
+// TestAddProjectMember_NamesTheUser: an invite names a login, which the
+// dashboard has resolved to a GitHub user ID; the membership is the ID's.
+func TestAddProjectMember_NamesTheUser(t *testing.T) {
+	handler, fake := newInternalTestServer(t)
+
+	w := do(handler, internalRequest(http.MethodPost, "/projects/"+projAlpha+"/members", "owner-a",
+		map[string]any{"login": "NewBie", "user_id": 9001, "role": data.RoleMember}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("add a member: got %d, want 201 (body: %s)", w.Code, w.Body.String())
+	}
+	fake.snapshot(func(f *fakeLogger) {
+		want := data.RPCAddMemberArgs{ProjectID: projAlpha, UserID: 9001, GithubLogin: "newbie", Role: data.RoleMember}
+		if len(f.addedMembers) != 1 || f.addedMembers[0] != want {
+			t.Errorf("AddMember calls = %+v, want one with %+v", f.addedMembers, want)
+		}
+	})
+
+	// The new member is in by ID, whatever login they sign in with.
+	if w := do(handler, requestAs(http.MethodGet, "/projects/"+projAlpha, "someone-else", 9001, nil)); w.Code != http.StatusOK {
+		t.Errorf("new member signing in: got %d, want 200", w.Code)
+	}
+	// Adding the same user again collides, under any login.
+	w = do(handler, internalRequest(http.MethodPost, "/projects/"+projAlpha+"/members", "owner-a",
+		map[string]any{"login": "newbie-renamed", "user_id": 9001, "role": data.RoleOwner}))
+	if w.Code != http.StatusConflict {
+		t.Errorf("add the same user again: got %d, want 409 (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+// TestAddProjectMember_RequiresAUserID: a membership without a user would be
+// matched by login alone, which is what this replaces, so it is refused.
+func TestAddProjectMember_RequiresAUserID(t *testing.T) {
+	handler, fake := newInternalTestServer(t)
+
+	for _, body := range []map[string]any{
+		{"login": "newbie", "role": data.RoleMember},
+		{"login": "newbie", "user_id": 0, "role": data.RoleMember},
+		{"login": "newbie", "user_id": -3, "role": data.RoleMember},
+		{"login": "newbie", "user_id": "9001", "role": data.RoleMember},
+	} {
+		w := do(handler, internalRequest(http.MethodPost, "/projects/"+projAlpha+"/members", "owner-a", body))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("add %v: got %d, want 400 (body: %s)", body, w.Code, w.Body.String())
+		}
+	}
+	fake.snapshot(func(f *fakeLogger) {
+		if len(f.addedMembers) != 0 {
+			t.Errorf("AddMember forwarded: %+v", f.addedMembers)
+		}
+	})
 }
 
 // --- project-scoped event access ---
@@ -548,6 +709,9 @@ func TestCreateProject_MakesCallerTheOwner(t *testing.T) {
 		}
 		if got := f.createdProjects[0].Owner; got != "newcomer" {
 			t.Errorf("owner login = %q, want %q", got, "newcomer")
+		}
+		if got := f.createdProjects[0].OwnerID; got != testUserID("newcomer") {
+			t.Errorf("owner user ID = %d, want the caller's, %d", got, testUserID("newcomer"))
 		}
 		if len(f.addedMembers) != 0 {
 			t.Errorf("AddMember called %d times, want 0: the owner is created with the project", len(f.addedMembers))

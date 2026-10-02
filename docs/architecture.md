@@ -71,7 +71,7 @@ The HTTP response comes back before the database write completes, but after Rabb
 
 When the dashboard loads the events list:
 
-1. The Frontend SSR loader calls the Broker's `GET /projects/{id}/logs` directly, on the internal network, with `X-Internal-Secret` and the user's login in `X-User-Login`.
+1. The Frontend SSR loader calls the Broker's `GET /projects/{id}/logs` directly, on the internal network, with `X-Internal-Secret` and the signed-in user in `X-User-ID` (their GitHub user ID) and `X-User-Login`.
 2. The Broker checks the user belongs to the project, dials the Logger on `logger:5001` and calls `RPCServer.GetLogs`.
 3. The Logger queries MongoDB with pagination and returns the results.
 4. The Broker serialises the result to JSON and returns it to the Frontend.

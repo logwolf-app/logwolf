@@ -35,7 +35,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 	// The id comes from the browser, so membership is re-checked here. A project
 	// the user can no longer reach — deleted, or one they were removed from —
 	// leaves the session alone; the layout loader re-points it on the way back.
-	const api = createApi(user.login);
+	const api = createApi(user);
 	const projects = await api.getProjects();
 
 	if (!projects.some((p) => p.id === projectId)) {

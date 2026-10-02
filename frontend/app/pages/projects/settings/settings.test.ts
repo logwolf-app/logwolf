@@ -28,6 +28,8 @@ describe('/projects/:id/settings', () => {
 			updateProject: async () => project(owned),
 			updateRetention: async (_id, days) => ({ days, choices: [0, 30, 60, 90, 180, 365] }),
 			addMember: async () => {},
+			updateMemberRole: async () => {},
+			removeMember: async () => {},
 			deleteProject: async () => {},
 			getMembers: async () => [],
 		});
@@ -59,8 +61,8 @@ describe('/projects/:id/settings', () => {
 	it.each<Record<string, string>>([
 		{ intent: 'rename', name: 'Renamed' },
 		{ intent: 'add-member', login: 'someone', role: 'member' },
-		{ intent: 'change-role', login: 'someone', role: 'owner' },
-		{ intent: 'remove-member', login: 'someone' },
+		{ intent: 'change-role', member: 'ddddddddddddddddddddddd4', login: 'someone', role: 'owner' },
+		{ intent: 'remove-member', member: 'ddddddddddddddddddddddd4', login: 'someone' },
 		{ intent: 'delete', confirmation: 'Joined' },
 	])('lets only an owner $intent', async (fields) => {
 		expect(await send(joined, fields, cookie)).toEqual({ error: 'Only an owner can change this.' });
@@ -109,7 +111,7 @@ describe('/projects/:id/settings', () => {
 				'fetch',
 				vi.fn(async (input: RequestInfo | URL) => {
 					const path = new URL(String(input)).pathname;
-					if (path === '/users/octodog') return Response.json({ login: 'OctoDog', type: 'User' });
+					if (path === '/users/octodog') return Response.json({ id: 9001, login: 'OctoDog', type: 'User' });
 					if (path === '/users/acme') return Response.json({ login: 'Acme', type: 'Organization' });
 					return new Response(null, { status: 404 });
 				}),
@@ -135,7 +137,7 @@ describe('/projects/:id/settings', () => {
 
 			const res = await send(owned, { intent: 'add-member', login: 'octodog', role: 'owner' }, cookie);
 
-			expect(api.addMember).toHaveBeenCalledWith(owned, 'OctoDog', 'owner');
+			expect(api.addMember).toHaveBeenCalledWith(owned, { id: 9001, login: 'OctoDog' }, 'owner');
 			expect(res).toMatchObject({
 				success: 'Added OctoDog as owner.',
 				warning: expect.stringMatching(/cannot sign in/),
@@ -149,7 +151,7 @@ describe('/projects/:id/settings', () => {
 			vi.stubEnv('LOGWOLF_ALLOWED_GITHUB_ORGS', 'acme');
 			const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 				const path = new URL(String(input)).pathname;
-				if (path === '/users/octodog') return Response.json({ login: 'OctoDog', type: 'User' });
+				if (path === '/users/octodog') return Response.json({ id: 9001, login: 'OctoDog', type: 'User' });
 				const asOwner = new Headers(init?.headers).get('Authorization') === 'Bearer gho_owner';
 				if (path === '/orgs/acme/members/OctoDog') return new Response(null, { status: asOwner ? 204 : 302 });
 				return new Response(null, { status: 404 });
@@ -173,6 +175,51 @@ describe('/projects/:id/settings', () => {
 			const res = await send(owned, { intent: 'add-member', login: 'octodog', role: 'member' }, cookie);
 
 			expect(res).toEqual({ success: 'Added OctoDog as member.', warning: undefined });
+		});
+
+		// The membership belongs to the GitHub user ID, which only GitHub's answer
+		// gives: without it there is nobody to add.
+		it('adds nobody when GitHub cannot say who the login is', async () => {
+			vi.stubGlobal(
+				'fetch',
+				vi.fn(async () => new Response(null, { status: 503 })),
+			);
+
+			const res = await send(owned, { intent: 'add-member', login: 'octodog', role: 'member' }, cookie);
+
+			expect(res).toEqual({ error: 'Could not reach GitHub to look up octodog. Try again in a moment.' });
+			expect(api.addMember).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('members', () => {
+		const member = 'ddddddddddddddddddddddd4';
+
+		it('loads the members, and the signed-in user by ID and login', async () => {
+			api.getMembers.mockResolvedValue([]);
+			api.getRetention.mockResolvedValue({ days: 90, choices: [90] });
+
+			const data = await loader({
+				request: get(`/projects/${owned}/settings`, cookie),
+				params: { id: owned },
+				context,
+			} as never);
+
+			expect(data).toMatchObject({ currentUser: { id: 583231, login: 'Octocat' } });
+		});
+
+		it('changes a role by the membership’s id', async () => {
+			const res = await send(owned, { intent: 'change-role', member, login: 'octodog', role: 'owner' }, cookie);
+
+			expect(api.updateMemberRole).toHaveBeenCalledWith(owned, member, 'owner');
+			expect(res).toEqual({ success: 'octodog is now an owner.' });
+		});
+
+		it('removes by the membership’s id', async () => {
+			const res = await send(owned, { intent: 'remove-member', member, login: 'octodog' }, cookie);
+
+			expect(api.removeMember).toHaveBeenCalledWith(owned, member);
+			expect(res).toEqual({ success: 'Removed octodog.' });
 		});
 	});
 

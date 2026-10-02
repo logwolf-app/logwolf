@@ -154,6 +154,7 @@ func TestRequireUserLogin_PresentHeader(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/keys", nil)
 	r.Header.Set("X-User-Login", "jpricardo")
+	r.Header.Set("X-User-ID", "583231")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -180,6 +181,7 @@ func TestRequireUserLogin_NormalizesCase(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/keys", nil)
 	r.Header.Set("X-User-Login", "JPRicardo")
+	r.Header.Set("X-User-ID", "583231")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -199,6 +201,50 @@ func TestRequireUserLogin_EmptyHeaderValue(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 on empty X-User-Login, got %d", w.Code)
+	}
+}
+
+// TestRequireUserLogin_StoresTheUserID: X-User-ID is who the caller is, and
+// what the membership checks match on.
+func TestRequireUserLogin_StoresTheUserID(t *testing.T) {
+	app := newApp()
+
+	var gotID int64
+	capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID = userIDFromContext(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := app.requireUserLogin(capture)
+
+	r := httptest.NewRequest(http.MethodGet, "/keys", nil)
+	r.Header.Set("X-User-Login", "jpricardo")
+	r.Header.Set("X-User-ID", " 583231 ")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK || gotID != 583231 {
+		t.Errorf("got %d with user ID %d, want 200 with 583231", w.Code, gotID)
+	}
+}
+
+// TestRequireUserLogin_RefusesAMissingOrInvalidUserID: a GitHub user ID is a
+// positive integer. Without one the caller is nobody, whatever their login.
+func TestRequireUserLogin_RefusesAMissingOrInvalidUserID(t *testing.T) {
+	app := newApp()
+	handler := app.requireUserLogin(http.HandlerFunc(okHandler))
+
+	for _, id := range []string{"", "0", "-583231", "octocat", "58.3", "99999999999999999999"} {
+		r := httptest.NewRequest(http.MethodGet, "/keys", nil)
+		r.Header.Set("X-User-Login", "jpricardo")
+		if id != "" {
+			r.Header.Set("X-User-ID", id)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("X-User-ID %q: got %d, want 401", id, w.Code)
+		}
 	}
 }
 

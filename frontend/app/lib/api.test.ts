@@ -6,7 +6,8 @@ const project = 'aaaaaaaaaaaaaaaaaaaaaaa1';
 
 describe('Api', () => {
 	let fetchMock: ReturnType<typeof vi.fn>;
-	const api = new Api('http://broker/', 'internal-secret', 'Octocat');
+	const api = new Api('http://broker/', 'internal-secret', { id: 583231, login: 'Octocat' });
+	const member = 'ccccccccccccccccccccccc3';
 
 	function answer(data: unknown, status = 200) {
 		fetchMock.mockResolvedValue(Response.json({ error: status >= 400, message: 'm', data }, { status }));
@@ -31,12 +32,13 @@ describe('Api', () => {
 
 	afterEach(() => vi.unstubAllGlobals());
 
-	it('sends the internal secret and the signed-in login on every call', async () => {
+	it('sends the internal secret and the signed-in user on every call', async () => {
 		answer([]);
 		await api.getProjects();
 
 		const { headers } = call();
 		expect(headers.get('X-Internal-Secret')).toBe('internal-secret');
+		expect(headers.get('X-User-ID')).toBe('583231');
 		expect(headers.get('X-User-Login')).toBe('Octocat');
 	});
 
@@ -58,18 +60,32 @@ describe('Api', () => {
 		['getMembers', () => api.getMembers(project), 'GET', `projects/${project}/members`, undefined],
 		[
 			'addMember',
-			() => api.addMember(project, 'octodog', 'member'),
+			() => api.addMember(project, { id: 9001, login: 'octodog' }, 'member'),
 			'POST',
 			`projects/${project}/members`,
-			{ login: 'octodog', role: 'member' },
+			{ login: 'octodog', user_id: 9001, role: 'member' },
+		],
+		[
+			'updateMemberRole',
+			() => api.updateMemberRole(project, member, 'owner'),
+			'PATCH',
+			`projects/${project}/members/${member}`,
+			{ role: 'owner' },
+		],
+		[
+			'removeMember',
+			() => api.removeMember(project, member),
+			'DELETE',
+			`projects/${project}/members/${member}`,
+			undefined,
 		],
 		['deleteProject', () => api.deleteProject(project), 'DELETE', `projects/${project}`, undefined],
 		[
 			'upsertCurrentUser',
-			() => api.upsertCurrentUser(583231, 'octo@example.com'),
+			() => api.upsertCurrentUser('octo@example.com'),
 			'PUT',
 			'users/me',
-			{ github_id: 583231, email: 'octo@example.com' },
+			{ email: 'octo@example.com' },
 		],
 	] as const)('%s calls %s %s', async (_name, run, method, path, body) => {
 		answer(method === 'GET' && path.endsWith('keys') ? [] : {});

@@ -12,6 +12,7 @@ import (
 	"net/rpc"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ type contextKey string
 
 const projectIDKey contextKey = "projectID"
 const userLoginKey contextKey = "userLogin"
+const userIDKey contextKey = "userID"
 const keyScopesKey contextKey = "keyScopes"
 
 func projectIDFromContext(r *http.Request) string {
@@ -42,6 +44,15 @@ func userLoginFromContext(r *http.Request) string {
 		return v
 	}
 	return ""
+}
+
+// userIDFromContext returns the signed-in user's GitHub user ID, which
+// requireUserLogin stored; 0 outside the dashboard routes.
+func userIDFromContext(r *http.Request) int64 {
+	if v, ok := r.Context().Value(userIDKey).(int64); ok {
+		return v
+	}
+	return 0
 }
 
 type cacheEntry struct {
@@ -393,13 +404,16 @@ func safePrefix(key string) string {
 	return "[invalid]"
 }
 
-// requireUserLogin extracts the GitHub login from X-User-Login and stores it,
-// normalized, in the request context for downstream handlers. Memberships are
-// stored normalized, so the handlers' role checks can compare with ==.
+// requireUserLogin identifies the signed-in user: their GitHub user ID from
+// X-User-ID, which is who they are and what memberships are matched on, and
+// their login from X-User-Login, normalized, which is what they are called. It
+// stores both in the request context for downstream handlers. The login still
+// finds memberships stored before user IDs, until they are linked to a user
+// (data.MemberFilter), and is what the dashboard records at sign-in.
 //
-// X-User-Login is caller-supplied and trusted without further verification.
+// Both headers are caller-supplied and trusted without further verification.
 // This middleware MUST run after requireInternalSecret; without that guard,
-// any client could impersonate any user by forging the header.
+// any client could impersonate any user by forging them.
 func (app *Config) requireUserLogin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		login := data.NormalizeGithubLogin(r.Header.Get("X-User-Login"))
@@ -409,7 +423,16 @@ func (app *Config) requireUserLogin(next http.Handler) http.Handler {
 			app.errorJSON(w, fmt.Errorf("missing X-User-Login header"), http.StatusUnauthorized)
 			return
 		}
+		// GitHub user IDs are positive integers; anything else names nobody.
+		userID, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get("X-User-ID")), 10, 64)
+		if err != nil || userID <= 0 {
+			log.Printf(`{"event":"auth","outcome":"deny","reason":"missing_x_user_id","method":"%s","path":"%s","remote_addr":"%s"}`,
+				r.Method, r.URL.Path, r.RemoteAddr)
+			app.errorJSON(w, fmt.Errorf("missing or invalid X-User-ID header"), http.StatusUnauthorized)
+			return
+		}
 		ctx := context.WithValue(r.Context(), userLoginKey, login)
+		ctx = context.WithValue(ctx, userIDKey, userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

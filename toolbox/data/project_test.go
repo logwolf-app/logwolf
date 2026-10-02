@@ -3,9 +3,11 @@ package data
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -162,5 +164,27 @@ func TestGetProjectsForUser_EmptyResult(t *testing.T) {
 	}
 	if len(projects) != 0 {
 		t.Error("empty []Project must have length 0")
+	}
+}
+
+// TestMemberFilter: a user's memberships are the ones linked to their user ID,
+// plus the ones stored before user IDs under their current login. A membership
+// linked to someone's ID is never matched by login.
+func TestMemberFilter(t *testing.T) {
+	got := MemberFilter(583231, "  OctoCat ")
+	want := bson.M{"$or": bson.A{
+		bson.M{"user_id": int64(583231)},
+		bson.M{"user_id": bson.M{"$exists": false}, "github_login": "octocat"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("MemberFilter(583231, OctoCat) = %v, want %v", got, want)
+	}
+
+	// No user ID: nothing linked can match, only login-only memberships.
+	want = bson.M{"user_id": bson.M{"$exists": false}, "github_login": "octocat"}
+	for _, id := range []int64{0, -1} {
+		if got := MemberFilter(id, "octocat"); !reflect.DeepEqual(got, want) {
+			t.Errorf("MemberFilter(%d, octocat) = %v, want %v", id, got, want)
+		}
 	}
 }

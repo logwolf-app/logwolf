@@ -35,7 +35,7 @@ describe('/projects/switch action', () => {
 
 		expect(location(res)).toBe('/events?page=2');
 		expect((await sessionSet(res as Response))?.get('currentProjectID')).toBe(beta);
-		expect(createApi).toHaveBeenCalledWith('Octocat');
+		expect(createApi).toHaveBeenCalledWith(expect.objectContaining({ id: 583231, login: 'Octocat' }));
 	});
 
 	it('leaves the session alone for a project the user does not belong to', async () => {

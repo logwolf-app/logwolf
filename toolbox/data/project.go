@@ -52,9 +52,18 @@ type Project struct {
 	Default bool `bson:"default,omitempty" json:"-"`
 }
 
+// ProjectMember is one user's membership of one project.
+//
+// UserID is the member's GitHub user ID, the key of the users collection, and
+// it is who the membership belongs to: access is decided by it, never by the
+// login. GithubLogin is the login the member was added under, normalized, kept
+// for display. Memberships stored before user IDs have none (UserID is 0, and
+// the field is absent in the database); until they are linked to a user they
+// are matched by login, as they always were. See MemberFilter.
 type ProjectMember struct {
 	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
 	ProjectID   primitive.ObjectID `bson:"project_id" json:"project_id"`
+	UserID      int64              `bson:"user_id,omitempty" json:"user_id,omitempty"`
 	GithubLogin string             `bson:"github_login" json:"github_login"`
 	Role        string             `bson:"role" json:"role"`
 	CreatedAt   time.Time          `bson:"created_at" json:"created_at"`
@@ -70,12 +79,14 @@ type UserProject struct {
 
 // RPC argument types for project and member operations.
 
-// RPCCreateProjectArgs is the RPC argument for CreateProject. Owner is the login
-// that gets the owner membership, created with the project in one transaction.
+// RPCCreateProjectArgs is the RPC argument for CreateProject. OwnerID and Owner
+// are the GitHub user ID and login of the user who gets the owner membership,
+// created with the project in one transaction.
 type RPCCreateProjectArgs struct {
-	Name  string
-	Slug  string
-	Owner string
+	Name    string
+	Slug    string
+	OwnerID int64
+	Owner   string
 }
 
 // RPCProjectIDArgs is the RPC argument for calls that take only a project ID.
@@ -90,39 +101,50 @@ type RPCUpdateProjectArgs struct {
 	Name string
 }
 
-// RPCUserProjectsArgs is the RPC argument for ListUserProjects.
+// RPCUserProjectsArgs is the RPC argument for ListUserProjects: the user, by
+// GitHub user ID, and their current login, which finds memberships not yet
+// linked to a user ID (see MemberFilter).
 type RPCUserProjectsArgs struct {
+	UserID      int64
 	GithubLogin string
 }
 
-// RPCAddMemberArgs is the RPC argument for AddMember.
+// RPCAddMemberArgs is the RPC argument for AddMember. UserID is the new
+// member's GitHub user ID, which the dashboard resolves from the login the
+// owner typed; the login is kept for display.
 type RPCAddMemberArgs struct {
 	ProjectID   string
+	UserID      int64
 	GithubLogin string
 	Role        string
 }
 
-// RPCRemoveMemberArgs is the RPC argument for RemoveMember.
+// RPCRemoveMemberArgs is the RPC argument for RemoveMember. MemberID is the
+// membership's own id (ProjectMember.ID), which names one row whether or not
+// it is linked to a user yet.
 type RPCRemoveMemberArgs struct {
-	ProjectID   string
-	GithubLogin string
+	ProjectID string
+	MemberID  string
 }
 
-// RPCUpdateMemberRoleArgs is the RPC argument for UpdateMemberRole.
+// RPCUpdateMemberRoleArgs is the RPC argument for UpdateMemberRole. MemberID is
+// the membership's own id, as in RPCRemoveMemberArgs.
 type RPCUpdateMemberRoleArgs struct {
-	ProjectID   string
-	GithubLogin string
-	Role        string
+	ProjectID string
+	MemberID  string
+	Role      string
 }
 
-// RPCProjectAccessArgs is the RPC argument for ProjectAccess.
+// RPCProjectAccessArgs is the RPC argument for ProjectAccess: the project, and
+// the caller by GitHub user ID and current login (see MemberFilter).
 type RPCProjectAccessArgs struct {
 	ProjectID   string
+	UserID      int64
 	GithubLogin string
 }
 
 // ProjectAccess is the reply of the logger's ProjectAccess RPC: whether the
-// project exists, and the login's role in it, empty for a non-member. The
+// project exists, and the caller's role in it, empty for a non-member. The
 // broker answers every project route from it, in one round trip.
 type ProjectAccess struct {
 	Exists bool
@@ -147,6 +169,21 @@ func ValidRole(r string) bool {
 // separate members.
 func NormalizeGithubLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
+}
+
+// MemberFilter matches the memberships that belong to a user: those linked to
+// their GitHub user ID, and those stored before user IDs, which carry only a
+// login, under their current login. A membership linked to a user ID is never
+// matched by login, so a login someone renamed away from, and another account
+// then took, does not carry the first user's memberships with it.
+//
+// A userID that is not positive names no user, and matches only by login.
+func MemberFilter(userID int64, githubLogin string) bson.M {
+	unlinked := bson.M{"user_id": bson.M{"$exists": false}, "github_login": NormalizeGithubLogin(githubLogin)}
+	if userID <= 0 {
+		return unlinked
+	}
+	return bson.M{"$or": bson.A{bson.M{"user_id": userID}, unlinked}}
 }
 
 // EnsureProjectIndexes creates the required indexes for projects and project_members.
@@ -178,6 +215,24 @@ func (m *Models) EnsureProjectIndexes() error {
 		return fmt.Errorf("EnsureProjectIndexes project_members.(project_id,github_login): %w", err)
 	}
 
+	// One membership per user per project. Memberships stored before user IDs
+	// have none and stay out of it.
+	if _, err := members.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "user_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("unique_project_member_user").
+			SetPartialFilterExpression(bson.M{"user_id": bson.M{"$exists": true}}),
+	}); err != nil {
+		return fmt.Errorf("EnsureProjectIndexes project_members.(project_id,user_id): %w", err)
+	}
+
+	// Listing a user's projects looks their memberships up by user ID alone.
+	if _, err := members.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "user_id", Value: 1}},
+		Options: options.Index().SetName("member_user_id"),
+	}); err != nil {
+		return fmt.Errorf("EnsureProjectIndexes project_members.user_id: %w", err)
+	}
+
 	return nil
 }
 
@@ -194,12 +249,15 @@ func (m *Models) InsertProject(p Project) (*Project, error) {
 	return &p, nil
 }
 
-// CreateProjectWithOwner inserts a project and an owner membership for login in
-// one transaction. Only an owner can add members, so a project that exists
-// without one is unreachable for good; here either both documents are written or
-// neither is.
-func (m *Models) CreateProjectWithOwner(p Project, login string) (*Project, error) {
+// CreateProjectWithOwner inserts a project and an owner membership for the user
+// with this GitHub user ID and login in one transaction. Only an owner can add
+// members, so a project that exists without one is unreachable for good; here
+// either both documents are written or neither is.
+func (m *Models) CreateProjectWithOwner(p Project, userID int64, login string) (*Project, error) {
 	login = NormalizeGithubLogin(login)
+	if userID <= 0 {
+		return nil, errors.New("CreateProjectWithOwner: owner user ID is required")
+	}
 	if login == "" {
 		return nil, errors.New("CreateProjectWithOwner: owner login is required")
 	}
@@ -218,6 +276,7 @@ func (m *Models) CreateProjectWithOwner(p Project, login string) (*Project, erro
 	owner := ProjectMember{
 		ID:          primitive.NewObjectID(),
 		ProjectID:   p.ID,
+		UserID:      userID,
 		GithubLogin: login,
 		Role:        RoleOwner,
 		CreatedAt:   p.CreatedAt,
@@ -276,6 +335,10 @@ func (m *Models) InsertProjectMember(pm ProjectMember) (*ProjectMember, error) {
 	return &pm, nil
 }
 
+// GetProjectMembers returns the project's memberships. A member linked to a
+// user who has signed in is shown under the login of their last sign-in, so a
+// GitHub rename shows up here too; the others keep the login they were added
+// under.
 func (m *Models) GetProjectMembers(projectID primitive.ObjectID) ([]ProjectMember, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -289,6 +352,37 @@ func (m *Models) GetProjectMembers(projectID primitive.ObjectID) ([]ProjectMembe
 	var members []ProjectMember
 	if err := cursor.All(ctx, &members); err != nil {
 		return nil, fmt.Errorf("GetProjectMembers decode: %w", err)
+	}
+
+	var userIDs []int64
+	for _, mb := range members {
+		if mb.UserID > 0 {
+			userIDs = append(userIDs, mb.UserID)
+		}
+	}
+	if len(userIDs) == 0 {
+		return members, nil
+	}
+
+	userCursor, err := m.users().Find(ctx, bson.M{"github_id": bson.M{"$in": userIDs}},
+		options.Find().SetProjection(bson.M{"github_id": 1, "github_login": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("GetProjectMembers users: %w", err)
+	}
+	defer userCursor.Close(ctx)
+
+	var users []User
+	if err := userCursor.All(ctx, &users); err != nil {
+		return nil, fmt.Errorf("GetProjectMembers users decode: %w", err)
+	}
+	logins := make(map[int64]string, len(users))
+	for _, u := range users {
+		logins[u.GithubID] = u.GithubLogin
+	}
+	for i, mb := range members {
+		if login := logins[mb.UserID]; login != "" {
+			members[i].GithubLogin = login
+		}
 	}
 	return members, nil
 }
@@ -359,14 +453,13 @@ func (m *Models) DeleteProject(id primitive.ObjectID) error {
 	return err
 }
 
-// RemoveProjectMember removes a member from a project. Returns ErrLastOwner if
-// the member is the sole remaining owner.
-func (m *Models) RemoveProjectMember(projectID primitive.ObjectID, githubLogin string) error {
-	githubLogin = NormalizeGithubLogin(githubLogin)
-
+// RemoveProjectMember removes the membership memberID from a project. Returns
+// ErrLastOwner if the member is the sole remaining owner, and
+// mongo.ErrNoDocuments if the project has no such membership.
+func (m *Models) RemoveProjectMember(projectID, memberID primitive.ObjectID) error {
 	return m.changeMembers("RemoveProjectMember", projectID, func(sc mongo.SessionContext, coll *mongo.Collection) error {
 		var target ProjectMember
-		if err := coll.FindOne(sc, bson.M{"project_id": projectID, "github_login": githubLogin}).Decode(&target); err != nil {
+		if err := coll.FindOne(sc, bson.M{"_id": memberID, "project_id": projectID}).Decode(&target); err != nil {
 			return fmt.Errorf("RemoveProjectMember: %w", err)
 		}
 
@@ -376,7 +469,7 @@ func (m *Models) RemoveProjectMember(projectID primitive.ObjectID, githubLogin s
 			}
 		}
 
-		result, err := coll.DeleteOne(sc, bson.M{"project_id": projectID, "github_login": githubLogin})
+		result, err := coll.DeleteOne(sc, bson.M{"_id": target.ID, "project_id": projectID})
 		if err != nil {
 			return fmt.Errorf("RemoveProjectMember delete: %w", err)
 		}
@@ -387,19 +480,18 @@ func (m *Models) RemoveProjectMember(projectID primitive.ObjectID, githubLogin s
 	})
 }
 
-// UpdateProjectMemberRole gives an existing member a new role. Returns
+// UpdateProjectMemberRole gives the membership memberID a new role. Returns
 // ErrLastOwner if that would demote the sole remaining owner, and
-// mongo.ErrNoDocuments if the login is not a member. Setting the role a member
-// already holds changes nothing.
-func (m *Models) UpdateProjectMemberRole(projectID primitive.ObjectID, githubLogin, role string) error {
+// mongo.ErrNoDocuments if the project has no such membership. Setting the role
+// a member already holds changes nothing.
+func (m *Models) UpdateProjectMemberRole(projectID, memberID primitive.ObjectID, role string) error {
 	if !ValidRole(role) {
 		return fmt.Errorf("UpdateProjectMemberRole: invalid role %q", role)
 	}
-	githubLogin = NormalizeGithubLogin(githubLogin)
 
 	return m.changeMembers("UpdateProjectMemberRole", projectID, func(sc mongo.SessionContext, coll *mongo.Collection) error {
 		var target ProjectMember
-		if err := coll.FindOne(sc, bson.M{"project_id": projectID, "github_login": githubLogin}).Decode(&target); err != nil {
+		if err := coll.FindOne(sc, bson.M{"_id": memberID, "project_id": projectID}).Decode(&target); err != nil {
 			return fmt.Errorf("UpdateProjectMemberRole: %w", err)
 		}
 		if target.Role == role {
@@ -468,17 +560,19 @@ func refuseLastOwner(sc mongo.SessionContext, coll *mongo.Collection, projectID 
 	return nil
 }
 
-// MemberRole returns githubLogin's role in the project, or "" if it is not a
-// member, including when the project does not exist.
-func (m *Models) MemberRole(projectID primitive.ObjectID, githubLogin string) (string, error) {
+// MemberRole returns the role in the project of the user with this GitHub user
+// ID and current login, or "" if they are not a member, including when the
+// project does not exist. Which memberships are theirs is MemberFilter's rule.
+func (m *Models) MemberRole(projectID primitive.ObjectID, userID int64, githubLogin string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	filter := MemberFilter(userID, githubLogin)
+	filter["project_id"] = projectID
+
 	var member ProjectMember
-	err := m.client.Database("logs").Collection("project_members").FindOne(ctx, bson.M{
-		"project_id":   projectID,
-		"github_login": NormalizeGithubLogin(githubLogin),
-	}, options.FindOne().SetProjection(bson.M{"role": 1})).Decode(&member)
+	err := m.client.Database("logs").Collection("project_members").FindOne(ctx, filter,
+		options.FindOne().SetProjection(bson.M{"role": 1})).Decode(&member)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return "", nil
 	}
@@ -502,13 +596,14 @@ func (m *Models) GetAllProjects(ctx context.Context) ([]Project, error) {
 	return projects, nil
 }
 
-// GetProjectsForUser returns every project the user is a member of, each paired
-// with the role they hold in it.
-func (m *Models) GetProjectsForUser(githubLogin string) ([]UserProject, error) {
+// GetProjectsForUser returns every project the user with this GitHub user ID
+// and current login is a member of, each paired with the role they hold in it.
+// Which memberships are theirs is MemberFilter's rule.
+func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserProject, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	memberCursor, err := m.client.Database("logs").Collection("project_members").Find(ctx, bson.M{"github_login": NormalizeGithubLogin(githubLogin)})
+	memberCursor, err := m.client.Database("logs").Collection("project_members").Find(ctx, MemberFilter(userID, githubLogin))
 	if err != nil {
 		return nil, fmt.Errorf("GetProjectsForUser members: %w", err)
 	}

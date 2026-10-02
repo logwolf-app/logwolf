@@ -121,8 +121,15 @@ one in session and returns to `/projects`, where the layout takes over.
 
 Adding a member checks the login first (`checkInvitee` in
 `app/lib/allowlist.server.ts`). A login GitHub does not know, or an
-organization, is refused. Otherwise the member is added under GitHub's casing,
-with a warning when the allowlist does not clear them.
+organization, is refused. Otherwise GitHub's answer gives the user's numeric
+ID, which the membership belongs to, and the member is added by that ID under
+GitHub's casing of the login, with a warning when the allowlist does not clear
+them. If GitHub cannot be asked who the login is, there is no ID and nobody is
+added.
+
+Role changes and removals name the member by the membership's `id`; the login
+in the form only words the message. The "you" badge goes by user ID, or, for a
+membership stored before user IDs, by login, as the broker matches it.
 
 Org membership is asked with the inviting owner's own GitHub token, kept from
 sign-in. GitHub shows private members only to someone in the org, so an owner in
@@ -130,8 +137,8 @@ an allowed org gets a definite answer for its private members too. Where GitHub
 will not answer the owner (they are not in that org, or the session predates
 tokens being kept, or the token was revoked), the check falls back to public
 membership, and a user it cannot clear gets a warning that allows for private
-membership. The same warning, worded for it, covers GitHub being unreachable or
-rate-limited: that never blocks an owner.
+membership. The same warning, worded for it, covers GitHub failing the org
+check after the user lookup answered: that never blocks an owner.
 
 ## Authentication
 
@@ -164,7 +171,7 @@ CSRF tokens are required on all mutating form submissions.
 
 `lib/api.ts` exports an `Api` class that calls Broker's **internal routes** using the `X-Internal-Secret` header (sourced from `INTERNAL_API_SECRET`). The frontend never calls the public Broker routes — those are for SDK clients only.
 
-The client is request-scoped: `createApi(login)` takes the GitHub login of the signed-in user and sends it as `X-User-Login` on every call, which is what the broker checks project membership against. Project-scoped methods (`getKeys`, `createKey`, `deleteKey`, `getMetrics`, `getRetention`, `updateRetention`, `getLogs`, `getLog`, `createLog`, `deleteLog`, and everything under `projects`) take the project id as an argument, so a route has to state which project it means; they all call the broker's `/projects/{id}/...` routes.
+The client is request-scoped: `createApi(user)` takes the signed-in user (the session's `githubUser`) and sends their GitHub user ID as `X-User-ID` and their login as `X-User-Login` on every call. The broker checks project membership against the user ID; the login only finds memberships stored before user IDs. Project-scoped methods (`getKeys`, `createKey`, `deleteKey`, `getMetrics`, `getRetention`, `updateRetention`, `getLogs`, `getLog`, `createLog`, `deleteLog`, and everything under `projects`) take the project id as an argument, so a route has to state which project it means; they all call the broker's `/projects/{id}/...` routes.
 
 Event payloads come back exactly as the broker stores them, so `getLogs`/`getLog` decode them with the SDK's own `LogwolfEventSchema` — `data` back into an object, timestamps back into `Date`s. Pages therefore keep working with `LogwolfEventData`, unchanged by the move off the SDK transport.
 

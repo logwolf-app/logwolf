@@ -68,22 +68,30 @@ export async function listGithubOrgs(accessToken: string, fetchImpl: typeof fetc
 // the dashboard adds someone it asks GitHub who they are, and checks them the
 // way sign-in will.
 
-/** What the dashboard learned about a login it is about to add to a project. */
+/**
+ * What the dashboard learned about a login it is about to add to a project.
+ * `id` is the GitHub user ID behind the login, which the membership belongs to;
+ * `login` is GitHub's casing of it.
+ */
 export type InviteeCheck =
 	/** No GitHub user by that name: refused, as it can only be a typo. */
 	| { kind: 'unknown' }
 	/** An organization, which can never sign in: refused. */
 	| { kind: 'organization'; login: string }
 	/** On the users allowlist, or a member of an allowed org. */
-	| { kind: 'allowed'; login: string }
+	| { kind: 'allowed'; id: number; login: string }
 	/**
 	 * Neither. `privateChecked` says whether that is certain: GitHub shows
 	 * private org membership only to a token of someone in the org, so without
 	 * one, a private member of an allowed org looks like a stranger.
 	 */
-	| { kind: 'not-allowlisted'; login: string; orgsAllowlisted: boolean; privateChecked: boolean }
-	/** GitHub could not be asked, or did not answer usefully. */
-	| { kind: 'unverified'; login: string };
+	| { kind: 'not-allowlisted'; id: number; login: string; orgsAllowlisted: boolean; privateChecked: boolean }
+	/**
+	 * GitHub could not be asked, or did not answer usefully. `id` is there when
+	 * the user lookup answered and only the allowlist check could not be made;
+	 * without it there is no user to add.
+	 */
+	| { kind: 'unverified'; id?: number; login: string };
 
 const GITHUB_TIMEOUT_MS = 5000;
 
@@ -126,8 +134,10 @@ async function privateMember(org: string, login: string, token: string, fetchImp
  * the owner is in that org. Without it, or where GitHub will not answer the
  * owner, only public membership can be seen. The user lookup needs no token.
  *
- * It never throws. When GitHub cannot say, the answer is `unverified`, and the
- * caller adds the member anyway: GitHub being down should not block an owner.
+ * It never throws. When GitHub cannot say, the answer is `unverified`. Once the
+ * user lookup has answered, with the user's ID, the caller adds the member
+ * anyway: GitHub failing the allowlist check should not block an owner. Without
+ * the ID there is nobody to add.
  */
 export async function checkInvitee(
 	login: string,
@@ -136,6 +146,7 @@ export async function checkInvitee(
 	token?: string,
 ): Promise<InviteeCheck> {
 	let canonical: string;
+	let id: number;
 	try {
 		const res = await githubGet(`/users/${encodeURIComponent(login)}`, fetchImpl);
 		if (res.status === 404) return { kind: 'unknown' };
@@ -147,11 +158,17 @@ export async function checkInvitee(
 		}
 		canonical = (user as { login: string }).login;
 		if ((user as { type?: unknown }).type === 'Organization') return { kind: 'organization', login: canonical };
+
+		const userId = (user as { id?: unknown }).id;
+		if (typeof userId !== 'number' || !Number.isSafeInteger(userId) || userId <= 0) {
+			return { kind: 'unverified', login: canonical };
+		}
+		id = userId;
 	} catch {
 		return { kind: 'unverified', login };
 	}
 
-	if (allowlist.users.includes(normalizeLogin(canonical))) return { kind: 'allowed', login: canonical };
+	if (allowlist.users.includes(normalizeLogin(canonical))) return { kind: 'allowed', id, login: canonical };
 
 	// Whether every allowed org was asked about private membership, and said no.
 	let privateChecked = true;
@@ -159,7 +176,7 @@ export async function checkInvitee(
 		try {
 			if (token) {
 				const member = await privateMember(org, canonical, token, fetchImpl);
-				if (member === true) return { kind: 'allowed', login: canonical };
+				if (member === true) return { kind: 'allowed', id, login: canonical };
 				if (member === false) continue;
 			}
 			privateChecked = false;
@@ -169,14 +186,14 @@ export async function checkInvitee(
 				`/orgs/${encodeURIComponent(org)}/public_members/${encodeURIComponent(canonical)}`,
 				fetchImpl,
 			);
-			if (res.status === 204) return { kind: 'allowed', login: canonical };
-			if (res.status !== 404) return { kind: 'unverified', login: canonical };
+			if (res.status === 204) return { kind: 'allowed', id, login: canonical };
+			if (res.status !== 404) return { kind: 'unverified', id, login: canonical };
 		} catch {
-			return { kind: 'unverified', login: canonical };
+			return { kind: 'unverified', id, login: canonical };
 		}
 	}
 
-	return { kind: 'not-allowlisted', login: canonical, orgsAllowlisted: allowlist.orgs.length > 0, privateChecked };
+	return { kind: 'not-allowlisted', id, login: canonical, orgsAllowlisted: allowlist.orgs.length > 0, privateChecked };
 }
 
 /**

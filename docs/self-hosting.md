@@ -45,7 +45,7 @@ logs.your-domain.com {
 
 Caddy will handle TLS automatically. The `email` field is used for Let's Encrypt expiry notifications.
 
-Keep the `@public` matcher as it is. It forwards only the Broker's public routes: the SDK's `/logs` routes, which need an API key, and the health checks. The Broker's other routes serve the dashboard. They take `INTERNAL_API_SECRET` and then act as whichever user `X-User-Login` names, so they must never be reachable from the internet; the Frontend calls them over the internal network. Forwarding all of `/api/*` would let anyone who learned the secret act as any user. If you put another proxy in front of the Broker, forward the same paths and nothing else.
+Keep the `@public` matcher as it is. It forwards only the Broker's public routes: the SDK's `/logs` routes, which need an API key, and the health checks. The Broker's other routes serve the dashboard. They take `INTERNAL_API_SECRET` and then act as whichever user `X-User-ID` and `X-User-Login` name, so they must never be reachable from the internet; the Frontend calls them over the internal network. Forwarding all of `/api/*` would let anyone who learned the secret act as any user. If you put another proxy in front of the Broker, forward the same paths and nothing else.
 
 ## Environment variables
 

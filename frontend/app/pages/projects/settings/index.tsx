@@ -27,7 +27,7 @@ export function meta({ data }: Route.MetaArgs) {
  */
 async function requireProject(request: Request, id: string | undefined) {
 	const user = await requireAuth(request);
-	const api = createApi(user.login);
+	const api = createApi(user);
 
 	const projects = await api.getProjects();
 	const project = projects.find((p) => p.id === id);
@@ -45,7 +45,13 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	const [members, retention] = await Promise.all([api.getMembers(project.id), api.getRetention(project.id)]);
 	event?.set('loaderData', { project, memberCount: members.length, days: retention.days });
 
-	return { project, members, days: retention.days, choices: retention.choices, currentUser: user.login };
+	return {
+		project,
+		members,
+		days: retention.days,
+		choices: retention.choices,
+		currentUser: { id: user.id, login: user.login },
+	};
 }
 
 export async function action({ request, params, context }: Route.ActionArgs) {
@@ -106,23 +112,32 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			if (check.kind === 'organization') {
 				return { error: `${check.login} is a GitHub organization; only users can be members.` };
 			}
+			// The membership belongs to the GitHub user ID behind the login, so
+			// without GitHub's answer there is nobody to add.
+			if (check.id === undefined) {
+				return { error: `Could not reach GitHub to look up ${check.login}. Try again in a moment.` };
+			}
 
-			await api.addMember(project.id, check.login, role);
+			await api.addMember(project.id, { id: check.id, login: check.login }, role);
 			return { success: `Added ${check.login} as ${role}.`, warning: inviteWarning(check) };
 		}
 
+		// Members are named by their membership's id; the login only words the
+		// message.
 		if (intent === 'change-role') {
+			const member = fd.get('member')?.toString() ?? '';
 			const login = fd.get('login')?.toString() ?? '';
 			const role = fd.get('role')?.toString();
 			if (role !== 'owner' && role !== 'member') return { error: 'Choose owner or member.' };
 
-			await api.updateMemberRole(project.id, login, role);
+			await api.updateMemberRole(project.id, member, role);
 			return { success: `${login} is now ${role === 'owner' ? 'an owner' : 'a member'}.` };
 		}
 
 		if (intent === 'remove-member') {
+			const member = fd.get('member')?.toString() ?? '';
 			const login = fd.get('login')?.toString() ?? '';
-			await api.removeMember(project.id, login);
+			await api.removeMember(project.id, member);
 			return { success: `Removed ${login}.` };
 		}
 

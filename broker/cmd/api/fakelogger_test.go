@@ -122,7 +122,9 @@ func (f *fakeLogger) CreateProject(args *data.RPCCreateProjectArgs, reply *data.
 	id := nextProjectID()
 	p := data.Project{ID: mustObjectID(id), Name: args.Name, Slug: args.Slug}
 	f.projects[id] = p
-	f.members[id] = []data.ProjectMember{{ProjectID: p.ID, GithubLogin: args.Owner, Role: data.RoleOwner}}
+	f.members[id] = []data.ProjectMember{{
+		ID: mustObjectID(testMemberID(id, args.Owner)), ProjectID: p.ID, UserID: args.OwnerID, GithubLogin: args.Owner, Role: data.RoleOwner,
+	}}
 	*reply = p
 	return nil
 }
@@ -186,7 +188,7 @@ func (f *fakeLogger) ListUserProjects(args *data.RPCUserProjectsArgs, reply *[]d
 	var out []data.UserProject
 	for id, members := range f.members {
 		for _, m := range members {
-			if m.GithubLogin != args.GithubLogin {
+			if !memberIs(m, args.UserID, args.GithubLogin) {
 				continue
 			}
 			if p, ok := f.projects[id]; ok {
@@ -220,7 +222,7 @@ func (f *fakeLogger) ProjectAccess(args *data.RPCProjectAccessArgs, reply *data.
 	_, exists := f.projects[args.ProjectID]
 	*reply = data.ProjectAccess{Exists: exists}
 	for _, m := range f.members[args.ProjectID] {
-		if m.GithubLogin == args.GithubLogin {
+		if memberIs(m, args.UserID, args.GithubLogin) {
 			reply.Role = m.Role
 		}
 	}
@@ -235,13 +237,22 @@ func (f *fakeLogger) AddMember(args *data.RPCAddMemberArgs, reply *string) error
 	if err := checkObjectID("AddMember", args.ProjectID); err != nil {
 		return err
 	}
+	if args.UserID <= 0 {
+		return fmt.Errorf("AddMember: %w", data.ErrInvalidUser)
+	}
+	// Like the logger's two unique indexes: one membership per user, and per login.
 	for _, m := range f.members[args.ProjectID] {
+		if m.UserID == args.UserID {
+			return fmt.Errorf("InsertProjectMember: %w", errDuplicateKey("unique_project_member_user"))
+		}
 		if m.GithubLogin == args.GithubLogin {
 			return fmt.Errorf("InsertProjectMember: %w", errDuplicateKey("unique_project_member"))
 		}
 	}
 	f.members[args.ProjectID] = append(f.members[args.ProjectID], data.ProjectMember{
+		ID:          mustObjectID(testMemberID(args.ProjectID, args.GithubLogin)),
 		ProjectID:   mustObjectID(args.ProjectID),
+		UserID:      args.UserID,
 		GithubLogin: args.GithubLogin,
 		Role:        args.Role,
 	})
@@ -249,26 +260,35 @@ func (f *fakeLogger) AddMember(args *data.RPCAddMemberArgs, reply *string) error
 	return nil
 }
 
+// findMember returns the index of the membership memberID in the project, or
+// the error the logger would answer. The caller holds f.mu.
+func (f *fakeLogger) findMember(op, projectID, memberID string) (int, error) {
+	if _, err := primitive.ObjectIDFromHex(memberID); err != nil {
+		return 0, fmt.Errorf("%s: invalid member ID: %w", op, err)
+	}
+	for i, m := range f.members[projectID] {
+		if m.ID.Hex() == memberID {
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("%s: %w", op, errNoDocuments)
+}
+
 func (f *fakeLogger) RemoveMember(args *data.RPCRemoveMemberArgs, reply *string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.removedMembers = append(f.removedMembers, *args)
-	if args.GithubLogin == f.lastOwnerLogin {
+	i, err := f.findMember("RemoveProjectMember", args.ProjectID, args.MemberID)
+	if err != nil {
+		return err
+	}
+	members := f.members[args.ProjectID]
+	if members[i].GithubLogin == f.lastOwnerLogin {
 		// data.ErrLastOwner's message, as the broker sees it over the wire.
 		return fmt.Errorf("cannot remove the last owner of a project")
 	}
-
-	kept := f.members[args.ProjectID][:0]
-	for _, m := range f.members[args.ProjectID] {
-		if m.GithubLogin != args.GithubLogin {
-			kept = append(kept, m)
-		}
-	}
-	if len(kept) == len(f.members[args.ProjectID]) {
-		return fmt.Errorf("RemoveProjectMember: %w", errNoDocuments)
-	}
-	f.members[args.ProjectID] = kept
+	f.members[args.ProjectID] = append(members[:i:i], members[i+1:]...)
 	*reply = "ok"
 	return nil
 }
@@ -278,18 +298,16 @@ func (f *fakeLogger) UpdateMemberRole(args *data.RPCUpdateMemberRoleArgs, reply 
 	defer f.mu.Unlock()
 
 	f.roleChanges = append(f.roleChanges, *args)
-	if args.GithubLogin == f.lastOwnerLogin && args.Role != data.RoleOwner {
+	i, err := f.findMember("UpdateProjectMemberRole", args.ProjectID, args.MemberID)
+	if err != nil {
+		return err
+	}
+	if f.members[args.ProjectID][i].GithubLogin == f.lastOwnerLogin && args.Role != data.RoleOwner {
 		return fmt.Errorf("UpdateProjectMemberRole: cannot remove the last owner of a project")
 	}
-
-	for i, m := range f.members[args.ProjectID] {
-		if m.GithubLogin == args.GithubLogin {
-			f.members[args.ProjectID][i].Role = args.Role
-			*reply = "ok"
-			return nil
-		}
-	}
-	return fmt.Errorf("UpdateProjectMemberRole: %w", errNoDocuments)
+	f.members[args.ProjectID][i].Role = args.Role
+	*reply = "ok"
+	return nil
 }
 
 func (f *fakeLogger) GetLogs(p data.QueryParams, reply *[]data.LogEntry) error {
@@ -476,14 +494,36 @@ func (f *fakeLogger) addProject(id, name, slug string) {
 	f.projects[id] = data.Project{ID: mustObjectID(id), Name: name, Slug: slug}
 }
 
+// addMember makes the user testUserID(login) a member, under id
+// testMemberID(projectID, login).
 func (f *fakeLogger) addMember(projectID, login, role string) {
+	f.addMembership(projectID, testUserID(login), login, role)
+}
+
+// addUnlinkedMember adds a membership stored before user IDs: a login alone.
+func (f *fakeLogger) addUnlinkedMember(projectID, login, role string) {
+	f.addMembership(projectID, 0, login, role)
+}
+
+func (f *fakeLogger) addMembership(projectID string, userID int64, login, role string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.members[projectID] = append(f.members[projectID], data.ProjectMember{
+		ID:          mustObjectID(testMemberID(projectID, login)),
 		ProjectID:   mustObjectID(projectID),
+		UserID:      userID,
 		GithubLogin: login,
 		Role:        role,
 	})
+}
+
+// memberIs applies data.MemberFilter's rule to one membership: it belongs to the
+// user with this ID, or, when it is linked to nobody, to whoever has its login.
+func memberIs(m data.ProjectMember, userID int64, login string) bool {
+	if m.UserID != 0 {
+		return userID > 0 && m.UserID == userID
+	}
+	return m.GithubLogin == login
 }
 
 func (f *fakeLogger) addLog(projectID, logID, name string) {

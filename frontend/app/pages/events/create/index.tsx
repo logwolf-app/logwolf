@@ -63,7 +63,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 		if (!projectId) return redirect('/projects/new');
 
 		const d = FormDataSchema.decode(Object.fromEntries(fd.entries()) as CreateEventFormData);
-		const res = await createApi(user.login)
+		const res = await createApi(user)
 			.createLog(projectId, new LogwolfEvent(d).toObject())
 			.then(() => redirect('/events'));
 		event?.set('actionData', res);

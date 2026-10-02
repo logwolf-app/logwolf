@@ -423,6 +423,180 @@ func (r *RPCServer) ListMembers(args *data.ProjectArgs, reply *[]data.ProjectMem
 	return nil
 }
 
+// --- Organizations ---
+//
+// An organization sits above projects and holds the plan. Its id travels as a
+// hex string like a project's, and is parsed once here.
+
+// parseOrganizationID turns the hex organization id an RPC argument carries into
+// an ObjectID. A malformed one names no organization; the error says "invalid
+// organization ID", for the broker to answer as not found.
+func parseOrganizationID(op, hex string) (primitive.ObjectID, error) {
+	id, err := primitive.ObjectIDFromHex(hex)
+	if err != nil {
+		return primitive.NilObjectID, fmt.Errorf("%s: invalid organization ID: %w", op, err)
+	}
+	return id, nil
+}
+
+// CreateOrganization creates an organization on args.Plan owned by the user
+// args.OwnerID, whose login is args.Owner. The organization and the owner
+// membership are written in one transaction, so a failure leaves neither.
+func (r *RPCServer) CreateOrganization(args *data.RPCCreateOrganizationArgs, reply *data.Organization) error {
+	log.Printf("Creating organization: %s (%s) owned by %s (%d)", args.Name, args.Plan, args.Owner, args.OwnerID)
+	org, err := r.models.CreateOrganizationWithOwner(data.Organization{Name: args.Name, Plan: args.Plan}, args.OwnerID, args.Owner)
+	if err != nil {
+		log.Println("Error creating organization:", err)
+		return err
+	}
+	*reply = *org
+	return nil
+}
+
+func (r *RPCServer) GetOrganization(args *data.RPCOrganizationIDArgs, reply *data.Organization) error {
+	id, err := parseOrganizationID("GetOrganization", args.ID)
+	if err != nil {
+		return err
+	}
+	org, err := r.models.GetOrganization(id)
+	if err != nil {
+		log.Println("Error getting organization:", err)
+		return err
+	}
+	*reply = *org
+	return nil
+}
+
+// UpdateOrganization renames an organization. Its plan is not changed here.
+func (r *RPCServer) UpdateOrganization(args *data.RPCUpdateOrganizationArgs, reply *data.Organization) error {
+	log.Printf("Renaming organization: %s", args.ID)
+	id, err := parseOrganizationID("UpdateOrganization", args.ID)
+	if err != nil {
+		return err
+	}
+	org, err := r.models.RenameOrganization(id, args.Name)
+	if err != nil {
+		log.Println("Error renaming organization:", err)
+		return err
+	}
+	*reply = *org
+	return nil
+}
+
+// ListUserOrganizations lists the organizations of the user args.UserID, each
+// with the role they hold in it.
+func (r *RPCServer) ListUserOrganizations(args *data.RPCUserOrganizationsArgs, reply *[]data.UserOrganization) error {
+	orgs, err := r.models.GetOrganizationsForUser(args.UserID)
+	if err != nil {
+		log.Println("Error listing user organizations:", err)
+		return err
+	}
+	*reply = orgs
+	return nil
+}
+
+// OrganizationAccess reports whether the organization exists and the caller's
+// role in it. A member's organization exists, so only a non-member costs a
+// second query.
+func (r *RPCServer) OrganizationAccess(args *data.RPCOrganizationAccessArgs, reply *data.OrganizationAccess) error {
+	orgID, err := parseOrganizationID("OrganizationAccess", args.OrganizationID)
+	if err != nil {
+		return err
+	}
+	role, err := r.models.OrganizationRole(orgID, args.UserID)
+	if err != nil {
+		return err
+	}
+	if role != "" {
+		*reply = data.OrganizationAccess{Exists: true, Role: role}
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	exists, err := r.models.OrganizationExists(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	*reply = data.OrganizationAccess{Exists: exists}
+	return nil
+}
+
+func (r *RPCServer) ListOrganizationMembers(args *data.RPCOrganizationIDArgs, reply *[]data.OrganizationMember) error {
+	orgID, err := parseOrganizationID("ListOrganizationMembers", args.ID)
+	if err != nil {
+		return err
+	}
+	members, err := r.models.GetOrganizationMembers(orgID)
+	if err != nil {
+		log.Println("Error listing organization members:", err)
+		return err
+	}
+	*reply = members
+	return nil
+}
+
+// AddOrganizationMember adds the user args.UserID to an organization. A user
+// who is a member already is refused with a duplicate key error.
+func (r *RPCServer) AddOrganizationMember(args *data.RPCAddOrganizationMemberArgs, reply *string) error {
+	orgID, err := parseOrganizationID("AddOrganizationMember", args.OrganizationID)
+	if err != nil {
+		return err
+	}
+	log.Printf("Adding member %s (%d) to organization %s as %s", args.GithubLogin, args.UserID, args.OrganizationID, args.Role)
+	_, err = r.models.InsertOrganizationMember(data.OrganizationMember{
+		OrganizationID: orgID,
+		UserID:         args.UserID,
+		GithubLogin:    args.GithubLogin,
+		Role:           args.Role,
+	})
+	if err != nil {
+		log.Println("Error adding organization member:", err)
+		return err
+	}
+	*reply = "ok"
+	return nil
+}
+
+func (r *RPCServer) RemoveOrganizationMember(args *data.RPCRemoveOrganizationMemberArgs, reply *string) error {
+	log.Printf("Removing member %s from organization %s", args.MemberID, args.OrganizationID)
+	orgID, err := parseOrganizationID("RemoveOrganizationMember", args.OrganizationID)
+	if err != nil {
+		return err
+	}
+	memberID, err := parseMemberID("RemoveOrganizationMember", args.MemberID)
+	if err != nil {
+		return err
+	}
+	if err := r.models.RemoveOrganizationMember(orgID, memberID); err != nil {
+		log.Println("Error removing organization member:", err)
+		return err
+	}
+	*reply = "ok"
+	return nil
+}
+
+func (r *RPCServer) UpdateOrganizationMemberRole(args *data.RPCUpdateOrganizationMemberRoleArgs, reply *string) error {
+	if !data.ValidOrganizationRole(args.Role) {
+		return fmt.Errorf("UpdateOrganizationMemberRole: invalid role %q", args.Role)
+	}
+	log.Printf("Setting role of member %s in organization %s to %s", args.MemberID, args.OrganizationID, args.Role)
+	orgID, err := parseOrganizationID("UpdateOrganizationMemberRole", args.OrganizationID)
+	if err != nil {
+		return err
+	}
+	memberID, err := parseMemberID("UpdateOrganizationMemberRole", args.MemberID)
+	if err != nil {
+		return err
+	}
+	if err := r.models.UpdateOrganizationMemberRole(orgID, memberID, args.Role); err != nil {
+		log.Println("Error updating organization member role:", err)
+		return err
+	}
+	*reply = "ok"
+	return nil
+}
+
 // --- Users ---
 //
 // A user is keyed by their GitHub user ID, which survives a rename; the login

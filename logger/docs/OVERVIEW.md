@@ -57,6 +57,22 @@ Both refuse a GitHub ID that is not positive with `data.ErrInvalidUser`.
 
 `UpsertUser` is called at each sign-in, so it is also where memberships stored before user IDs, which carry only a login, are linked to the user signing in under that login (`data.LinkMemberships`). A failure in either step fails the call, and the sign-in with it; both are idempotent, so the next sign-in finishes the job.
 
+Organizations sit above projects and hold the plan. Their members are always users, by GitHub user ID, with the role `owner`, `admin` or `member`:
+
+| Method                                   | Input                                 | Output                 | Description                                                                       |
+| ---------------------------------------- | ------------------------------------- | ---------------------- | --------------------------------------------------------------------------------- |
+| `RPCServer.CreateOrganization`           | `RPCCreateOrganizationArgs`           | `Organization`         | Create an organization on a plan, with its owner, in one transaction              |
+| `RPCServer.GetOrganization`              | `RPCOrganizationIDArgs`               | `Organization`         | Fetch one organization                                                            |
+| `RPCServer.UpdateOrganization`           | `RPCUpdateOrganizationArgs`           | `Organization`         | Rename an organization; the plan is not changed here                              |
+| `RPCServer.ListUserOrganizations`        | `RPCUserOrganizationsArgs`            | `[]UserOrganization`   | A user's organizations, each with their role, oldest first                        |
+| `RPCServer.OrganizationAccess`           | `RPCOrganizationAccessArgs`           | `OrganizationAccess`   | Whether the organization exists, and the caller's role in it (empty for none)     |
+| `RPCServer.ListOrganizationMembers`      | `RPCOrganizationIDArgs`               | `[]OrganizationMember` | The members, under the login of their last sign-in where there is one             |
+| `RPCServer.AddOrganizationMember`        | `RPCAddOrganizationMemberArgs`        | `string`               | Add a user; a second membership of one user is a duplicate key error              |
+| `RPCServer.RemoveOrganizationMember`     | `RPCRemoveOrganizationMemberArgs`     | `string`               | Remove a membership by its id; never the last owner (`ErrLastOrganizationOwner`)  |
+| `RPCServer.UpdateOrganizationMemberRole` | `RPCUpdateOrganizationMemberRoleArgs` | `string`               | Change a membership's role; never demotes the last owner                          |
+
+A malformed organization id is an `invalid organization ID` error, for the Broker to answer as 404, like a project's; a malformed member id is an `invalid member ID` error. `CreateOrganization` refuses an organization without a name or a plan (`ErrInvalidOrganization`) or without an owner (`ErrInvalidUser`); `AddOrganizationMember` refuses a member without a positive GitHub user ID or a login (`ErrInvalidUser`), and every member method refuses a role that is not an organization role.
+
 ## HTTP interface
 
 | Method | Path      | Description                                                                                          |
@@ -82,7 +98,7 @@ Each log entry stored in MongoDB contains:
 | `created_at` | time.Time | Timestamp (drives retention)    |
 | `updated_at` | time.Time | Last update timestamp           |
 
-`api_keys.project_id`, `settings.project_id` and `project_members.project_id` are ObjectIDs too. RPC arguments carry project ids as hex strings; each RPC method parses them (`parseProjectID`) and refuses a malformed one with a `not a valid ObjectID` error, which the broker answers with 404.
+`api_keys.project_id`, `settings.project_id` and `project_members.project_id` are ObjectIDs too, as is `organization_members.organization_id`, like `organizations._id`. RPC arguments carry project ids as hex strings; each RPC method parses them (`parseProjectID`) and refuses a malformed one with a `not a valid ObjectID` error, which the broker answers with 404.
 
 `CreateProject` takes the owner's login with the project, and writes both in one transaction (`CreateProjectWithOwner`). `UpdateProject` renames only: the slug is fixed at creation.
 

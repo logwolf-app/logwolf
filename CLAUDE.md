@@ -128,10 +128,11 @@ RPC methods (Go stdlib `net/rpc`):
 - `RPCServer.DeleteLog` — delete by filter, returns count
 - `RPCServer.ValidateAPIKey`, `ListAPIKeys`, `CreateAPIKey`, `RevokeAPIKey` — API key storage for the broker; replies never carry the hash, and revoke matches the project as well as the id
 - `RPCServer.UpsertUser`, `GetUser` — the `users` collection, keyed by GitHub user ID (unique `github_id` index); the stored `github_login` is only the login at the last sign-in. An unknown user is `Found` false, not an error. `UpsertUser` also links the user's login-only memberships (`data.LinkMemberships`); if either step fails, so does the sign-in
+- `RPCServer.CreateOrganization`, `GetOrganization`, `UpdateOrganization`, `ListUserOrganizations`, `OrganizationAccess`, `ListOrganizationMembers`, `AddOrganizationMember`, `RemoveOrganizationMember`, `UpdateOrganizationMemberRole` — organizations (`organizations`: `name`, `plan`, `billing_customer_id`, empty self-hosted) and their members (`organization_members`, unique on `(organization_id, user_id)`, roles `owner`/`admin`/`member`, always by user ID). Ids travel as hex strings and are `primitive.ObjectID`s in `data`, like project ids; a malformed one is `invalid organization ID`. An organization never loses its last owner (`ErrLastOrganizationOwner`, serialized like project members). Project roles are unchanged, except that an organization owner is owner of every project in it (`data.EffectiveProjectRole`)
 
 ### Toolbox (`toolbox/`)
 
-Packages: `data` (Models, LogEntry, APIKey, Settings, User), `event` (emitter + consumer), `limits` (`Provider`, the edition's limits), `rabbitmq` (connection), `json` (helpers).
+Packages: `data` (Models, LogEntry, APIKey, Settings, User, Organization), `event` (emitter + consumer), `limits` (`Provider`, the edition's limits), `rabbitmq` (connection), `json` (helpers).
 
 The `data.Models` struct is the sole database accessor passed between services.
 

@@ -30,6 +30,13 @@ type Provider interface {
 	// (Plan.RetentionChoices). 0 is forever. Every value must be one of
 	// data.ValidRetentionDays, the only ones the logger stores.
 	RetentionChoices(ctx context.Context, projectID string) ([]int, error)
+
+	// OrganizationPlan returns the plan of an organization that stores plan as
+	// its plan's name (data.Organization.Plan).
+	OrganizationPlan(plan string) (Plan, error)
+
+	// NewOrganizationPlan is the plan an organization a user creates starts on.
+	NewOrganizationPlan() Plan
 }
 
 // PlanLookup returns the name of the plan of the organization a project is in.
@@ -95,6 +102,17 @@ func (SelfHosted) RetentionChoices(context.Context, string) ([]int, error) {
 	return SelfHostedPlan().RetentionChoices(), nil
 }
 
+// OrganizationPlan is SelfHostedPlan, whatever the organization stores.
+func (SelfHosted) OrganizationPlan(string) (Plan, error) {
+	return SelfHostedPlan(), nil
+}
+
+// NewOrganizationPlan is SelfHostedPlan: every organization of a self-hosted
+// install is on it.
+func (SelfHosted) NewOrganizationPlan() Plan {
+	return SelfHostedPlan()
+}
+
 // Organizations is the hosted edition's Provider: a project's limits are those
 // of its organization's plan, which PlanOf names.
 type Organizations struct {
@@ -108,11 +126,27 @@ func (o Organizations) Plan(ctx context.Context, projectID string) (Plan, error)
 	if err != nil {
 		return Plan{}, fmt.Errorf("plan of project %s: %w", projectID, err)
 	}
-	p, ok := PlanByName(name)
-	if !ok {
-		return Plan{}, fmt.Errorf("plan of project %s: unknown plan %q", projectID, name)
+	p, err := o.OrganizationPlan(name)
+	if err != nil {
+		return Plan{}, fmt.Errorf("plan of project %s: %w", projectID, err)
 	}
 	return p, nil
+}
+
+// OrganizationPlan is the plan named plan. A name that is not in the table is
+// an error, not a plan without limits.
+func (Organizations) OrganizationPlan(plan string) (Plan, error) {
+	p, ok := PlanByName(plan)
+	if !ok {
+		return Plan{}, fmt.Errorf("unknown plan %q", plan)
+	}
+	return p, nil
+}
+
+// NewOrganizationPlan is the free plan: a hosted organization is on it until
+// it subscribes.
+func (Organizations) NewOrganizationPlan() Plan {
+	return plans[PlanFree]
 }
 
 // AllowIngest allows every event for now: events are not counted yet, so there

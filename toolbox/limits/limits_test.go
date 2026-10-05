@@ -191,3 +191,33 @@ func TestOrganizations_LookupFailure(t *testing.T) {
 		t.Errorf("RetentionChoices error = %v, want it to wrap %v", err, lookupErr)
 	}
 }
+
+// A self-hosted organization is on the plan that limits nothing, whatever name
+// it stores, and so is one a user creates.
+func TestSelfHosted_OrganizationPlans(t *testing.T) {
+	for _, stored := range []string{PlanSelfHosted, PlanFree, "enterprise", ""} {
+		got, err := SelfHosted{}.OrganizationPlan(stored)
+		if err != nil || got != SelfHostedPlan() {
+			t.Errorf("OrganizationPlan(%q) = %+v, %v; want %+v", stored, got, err, SelfHostedPlan())
+		}
+	}
+	if got := (SelfHosted{}).NewOrganizationPlan(); got != SelfHostedPlan() {
+		t.Errorf("NewOrganizationPlan = %+v, want %+v", got, SelfHostedPlan())
+	}
+}
+
+// A hosted organization is on the plan it names, and starts on the free one.
+func TestOrganizations_OrganizationPlans(t *testing.T) {
+	o := Organizations{PlanOf: planNamed(PlanPro)}
+
+	got, err := o.OrganizationPlan(PlanTeam)
+	if want, _ := PlanByName(PlanTeam); err != nil || got != want {
+		t.Errorf("OrganizationPlan(team) = %+v, %v; want %+v", got, err, want)
+	}
+	if p, err := o.OrganizationPlan("enterprise"); err == nil || !strings.Contains(err.Error(), `"enterprise"`) {
+		t.Errorf("OrganizationPlan(enterprise) = %+v, %v; want an error naming the plan", p, err)
+	}
+	if got, want := o.NewOrganizationPlan(), plans[PlanFree]; got != want {
+		t.Errorf("NewOrganizationPlan = %+v, want %+v", got, want)
+	}
+}

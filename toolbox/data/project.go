@@ -792,7 +792,9 @@ func (m *Models) GetAllProjects(ctx context.Context) ([]Project, error) {
 
 // GetProjectsForUser returns every project the user with this GitHub user ID
 // and current login is a member of, each paired with the role they hold in it.
-// Which memberships are theirs is MemberFilter's rule.
+// Which memberships are theirs is MemberFilter's rule. The projects of the
+// organizations they own are theirs too, as owner (EffectiveProjectRole),
+// whatever the projects' own memberships say.
 func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserProject, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -808,7 +810,12 @@ func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserPro
 		return nil, fmt.Errorf("GetProjectsForUser members decode: %w", err)
 	}
 
-	if len(members) == 0 {
+	owned, err := m.ownedOrganizations(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("GetProjectsForUser: %w", err)
+	}
+
+	if len(members) == 0 && len(owned) == 0 {
 		return []UserProject{}, nil
 	}
 
@@ -818,8 +825,16 @@ func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserPro
 		ids[i] = mb.ProjectID
 		roles[mb.ProjectID] = mb.Role
 	}
+	ownedOrg := make(map[primitive.ObjectID]bool, len(owned))
+	for _, id := range owned {
+		ownedOrg[id] = true
+	}
 
-	projectCursor, err := m.client.Database("logs").Collection("projects").Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+	filter := bson.M{"$or": bson.A{
+		bson.M{"_id": bson.M{"$in": ids}},
+		bson.M{"organization_id": bson.M{"$in": owned}},
+	}}
+	projectCursor, err := m.client.Database("logs").Collection("projects").Find(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("GetProjectsForUser projects: %w", err)
 	}
@@ -834,7 +849,11 @@ func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserPro
 	// row lingers); the projects query is what decides which entries survive.
 	result := make([]UserProject, 0, len(projects))
 	for _, p := range projects {
-		result = append(result, UserProject{Project: p, Role: roles[p.ID]})
+		var orgRole string
+		if ownedOrg[p.OrganizationID] {
+			orgRole = RoleOwner
+		}
+		result = append(result, UserProject{Project: p, Role: EffectiveProjectRole(roles[p.ID], orgRole)})
 	}
 	return result, nil
 }

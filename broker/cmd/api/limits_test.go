@@ -30,6 +30,12 @@ func (p *planLimits) RetentionChoices(_ context.Context, projectID string) ([]in
 	return p.retention, p.err
 }
 
+func (p *planLimits) OrganizationPlan(name string) (limits.Plan, error) {
+	return limits.Plan{Name: name}, p.err
+}
+
+func (p *planLimits) NewOrganizationPlan() limits.Plan { return limits.Plan{Name: "fixed"} }
+
 // newLimitedTestServer is newInternalTestServer with lim as the edition's limits.
 func newLimitedTestServer(t *testing.T, lim limits.Provider) (http.Handler, *fakeLogger) {
 	t.Helper()

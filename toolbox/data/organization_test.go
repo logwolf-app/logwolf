@@ -111,7 +111,7 @@ func TestInsertOrganizationMember_RefusesBadInput(t *testing.T) {
 func TestUpdateOrganizationMemberRole_RefusesUnknownRole(t *testing.T) {
 	var m Models
 
-	if err := m.UpdateOrganizationMemberRole(primitive.NewObjectID(), primitive.NewObjectID(), "viewer"); err == nil {
+	if err := m.UpdateOrganizationMemberRole(primitive.NewObjectID(), primitive.NewObjectID(), "viewer", RoleOwner); err == nil {
 		t.Error("UpdateOrganizationMemberRole accepted the role viewer")
 	}
 }

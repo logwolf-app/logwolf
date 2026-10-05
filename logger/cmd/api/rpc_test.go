@@ -317,6 +317,10 @@ func TestOrganizationMethods_MalformedID(t *testing.T) {
 			var reply []data.OrganizationMember
 			return srv.ListOrganizationMembers(&data.RPCOrganizationIDArgs{ID: bad}, &reply)
 		},
+		"OrganizationUsage": func() error {
+			var reply data.OrganizationUsage
+			return srv.OrganizationUsage(&data.RPCOrganizationIDArgs{ID: bad}, &reply)
+		},
 		"AddOrganizationMember": func() error {
 			var reply string
 			return srv.AddOrganizationMember(&data.RPCAddOrganizationMemberArgs{

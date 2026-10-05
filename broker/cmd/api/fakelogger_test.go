@@ -35,6 +35,7 @@ type fakeLogger struct {
 	keys      map[string]data.APIKey          // key id hex -> key
 	plaintext map[string]string               // plaintext key -> key id hex
 	users     map[int64]data.User             // GitHub user ID -> user
+	plans     map[string]string               // project id hex -> its organization's plan
 
 	// Recorded calls, for asserting what the broker forwarded.
 	getLogsParams   []data.QueryParams
@@ -89,6 +90,7 @@ func newFakeLogger() *fakeLogger {
 		keys:      map[string]data.APIKey{},
 		plaintext: map[string]string{},
 		users:     map[int64]data.User{},
+		plans:     map[string]string{},
 	}
 }
 
@@ -226,6 +228,26 @@ func (f *fakeLogger) ProjectAccess(args *data.RPCProjectAccessArgs, reply *data.
 			reply.Role = m.Role
 		}
 	}
+	return nil
+}
+
+// ProjectPlan answers the plan setPlan gave the project; a project without one
+// is in no organization.
+func (f *fakeLogger) ProjectPlan(args *data.RPCProjectIDArgs, reply *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := checkObjectID("ProjectPlan", args.ID); err != nil {
+		return err
+	}
+	if _, ok := f.projects[args.ID]; !ok {
+		return errNoDocuments
+	}
+	plan, ok := f.plans[args.ID]
+	if !ok {
+		return fmt.Errorf("ProjectPlan: project %s: %w", args.ID, data.ErrUnknownOrganization)
+	}
+	*reply = plan
 	return nil
 }
 
@@ -492,6 +514,13 @@ func (f *fakeLogger) addProject(id, name, slug string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.projects[id] = data.Project{ID: mustObjectID(id), Name: name, Slug: slug}
+}
+
+// setPlan puts the project in an organization on plan.
+func (f *fakeLogger) setPlan(projectID, plan string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.plans[projectID] = plan
 }
 
 // addMember makes the user testUserID(login) a member, under id

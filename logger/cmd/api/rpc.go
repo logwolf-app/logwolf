@@ -477,6 +477,25 @@ func (r *RPCServer) GetOrganization(args *data.RPCOrganizationIDArgs, reply *dat
 	return nil
 }
 
+// ProjectPlan answers the name of the plan of the organization the project is
+// in. The hosted edition's limits.Provider resolves a project's limits from it.
+func (r *RPCServer) ProjectPlan(args *data.RPCProjectIDArgs, reply *string) error {
+	id, err := parseProjectID("ProjectPlan", args.ID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	plan, err := r.models.ProjectPlan(ctx, id)
+	if err != nil {
+		log.Println("Error getting project plan:", err)
+		return err
+	}
+	*reply = plan
+	return nil
+}
+
 // UpdateOrganization renames an organization. Its plan is not changed here.
 func (r *RPCServer) UpdateOrganization(args *data.RPCUpdateOrganizationArgs, reply *data.Organization) error {
 	log.Printf("Renaming organization: %s", args.ID)

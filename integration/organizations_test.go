@@ -516,3 +516,76 @@ func TestOrganizationRPC(t *testing.T) {
 		t.Errorf("logger did not create the unique (organization_id, user_id) index; indexes: %+v", indexes)
 	}
 }
+
+// TestProjectPlan: a project's plan is its organization's, read afresh on each
+// call, so a plan change shows at once. A project outside any organization has
+// no plan, rather than an empty one.
+func TestProjectPlan(t *testing.T) {
+	m, db := setupOrganizationModels(t)
+	ctx := context.Background()
+
+	org := createOrganization(t, m, "Planned", 2101, "planner")
+	project, err := m.InsertProject(data.Project{Name: "Planned", Slug: "planned", OrganizationID: org.ID})
+	if err != nil {
+		t.Fatalf("InsertProject: %v", err)
+	}
+	if plan, err := m.ProjectPlan(ctx, project.ID); err != nil || plan != "free" {
+		t.Errorf("ProjectPlan = %q, %v; want free, the organization's", plan, err)
+	}
+
+	if _, err := db.Collection("organizations").UpdateOne(ctx, bson.M{"_id": org.ID}, bson.M{"$set": bson.M{"plan": "pro"}}); err != nil {
+		t.Fatalf("change plan: %v", err)
+	}
+	if plan, err := m.ProjectPlan(ctx, project.ID); err != nil || plan != "pro" {
+		t.Errorf("ProjectPlan after a plan change = %q, %v; want pro", plan, err)
+	}
+
+	loose, err := m.InsertProject(data.Project{Name: "Loose", Slug: "loose"})
+	if err != nil {
+		t.Fatalf("InsertProject: %v", err)
+	}
+	orphan, err := m.InsertProject(data.Project{Name: "Orphan", Slug: "orphan", OrganizationID: primitive.NewObjectID()})
+	if err != nil {
+		t.Fatalf("InsertProject: %v", err)
+	}
+	for name, id := range map[string]primitive.ObjectID{"no organization": loose.ID, "a missing organization": orphan.ID} {
+		if plan, err := m.ProjectPlan(ctx, id); !errors.Is(err, data.ErrUnknownOrganization) {
+			t.Errorf("ProjectPlan of a project in %s = %q, %v; want ErrUnknownOrganization", name, plan, err)
+		}
+	}
+
+	if plan, err := m.ProjectPlan(ctx, primitive.NewObjectID()); !errors.Is(err, mongo.ErrNoDocuments) {
+		t.Errorf("ProjectPlan of an unknown project = %q, %v; want mongo.ErrNoDocuments", plan, err)
+	}
+}
+
+// TestProjectPlanRPC: a project created through the logger is in the Default
+// organization, so on a self-hosted deployment its plan is the self-hosted one.
+func TestProjectPlanRPC(t *testing.T) {
+	stack := sharedStack(t)
+
+	conn, err := rpc.Dial("tcp", stack.loggerRPCAddr)
+	if err != nil {
+		t.Fatalf("dial logger RPC: %v", err)
+	}
+	defer conn.Close()
+
+	var project data.Project
+	if err := conn.Call("RPCServer.CreateProject", data.RPCCreateProjectArgs{
+		Name: "Plan RPC", Slug: "plan-rpc", OwnerID: time.Now().UnixNano(), Owner: "plan-rpc-owner",
+	}, &project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	var plan string
+	if err := conn.Call("RPCServer.ProjectPlan", data.RPCProjectIDArgs{ID: project.ID.Hex()}, &plan); err != nil {
+		t.Fatalf("ProjectPlan: %v", err)
+	}
+	if plan != data.SelfHostedPlan {
+		t.Errorf("ProjectPlan = %q, want %q", plan, data.SelfHostedPlan)
+	}
+
+	if err := conn.Call("RPCServer.ProjectPlan", data.RPCProjectIDArgs{ID: "not-a-project"}, &plan); err == nil {
+		t.Error("ProjectPlan accepted a malformed project id")
+	}
+}

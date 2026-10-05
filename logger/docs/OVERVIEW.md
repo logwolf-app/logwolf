@@ -64,6 +64,7 @@ Organizations sit above projects and hold the plan. Their members are always use
 | `RPCServer.CreateOrganization`           | `RPCCreateOrganizationArgs`           | `Organization`         | Create an organization on a plan, with its owner, in one transaction              |
 | `RPCServer.GetOrganization`              | `RPCOrganizationIDArgs`               | `Organization`         | Fetch one organization                                                            |
 | `RPCServer.UpdateOrganization`           | `RPCUpdateOrganizationArgs`           | `Organization`         | Rename an organization; the plan is not changed here                              |
+| `RPCServer.ProjectPlan`                  | `RPCProjectIDArgs`                    | `string`               | The plan name of a project's organization, which the Broker's limits resolve from |
 | `RPCServer.ListUserOrganizations`        | `RPCUserOrganizationsArgs`            | `[]UserOrganization`   | A user's organizations, each with their role, oldest first                        |
 | `RPCServer.OrganizationAccess`           | `RPCOrganizationAccessArgs`           | `OrganizationAccess`   | Whether the organization exists, and the caller's role in it (empty for none)     |
 | `RPCServer.ListOrganizationMembers`      | `RPCOrganizationIDArgs`               | `[]OrganizationMember` | The members, under the login of their last sign-in where there is one             |

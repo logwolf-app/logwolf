@@ -177,6 +177,10 @@ func TestProjectScopedMethods_MalformedProjectID(t *testing.T) {
 			var reply string
 			return srv.RevokeAPIKey(&data.RPCRevokeAPIKeyArgs{ProjectID: bad, ID: primitive.NewObjectID().Hex()}, &reply)
 		},
+		"ProjectPlan": func() error {
+			var reply string
+			return srv.ProjectPlan(&data.RPCProjectIDArgs{ID: bad}, &reply)
+		},
 	} {
 		err := call()
 		if err == nil || !strings.Contains(err.Error(), "not a valid ObjectID") {

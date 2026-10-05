@@ -305,6 +305,35 @@ func (m *Models) OrganizationExists(ctx context.Context, id primitive.ObjectID) 
 	return n > 0, nil
 }
 
+// ProjectPlan returns the name of the plan of the organization the project is
+// in, which a project's limits are resolved from (limits.Provider). A project
+// that does not exist is mongo.ErrNoDocuments (wrapped); one in no
+// organization, or in one that does not exist, is ErrUnknownOrganization.
+func (m *Models) ProjectPlan(ctx context.Context, projectID primitive.ObjectID) (string, error) {
+	var p Project
+	err := m.client.Database("logs").Collection("projects").
+		FindOne(ctx, bson.M{"_id": projectID}, options.FindOne().SetProjection(bson.M{"organization_id": 1})).
+		Decode(&p)
+	if err != nil {
+		return "", fmt.Errorf("ProjectPlan: %w", err)
+	}
+	if p.OrganizationID.IsZero() {
+		return "", fmt.Errorf("ProjectPlan: project %s: %w", projectID.Hex(), ErrUnknownOrganization)
+	}
+
+	var o Organization
+	err = m.organizations().
+		FindOne(ctx, bson.M{"_id": p.OrganizationID}, options.FindOne().SetProjection(bson.M{"plan": 1})).
+		Decode(&o)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", fmt.Errorf("ProjectPlan: project %s: %w", projectID.Hex(), ErrUnknownOrganization)
+	}
+	if err != nil {
+		return "", fmt.Errorf("ProjectPlan: %w", err)
+	}
+	return o.Plan, nil
+}
+
 // RenameOrganization changes an organization's name, and returns it as stored,
 // or mongo.ErrNoDocuments (wrapped) if there is no such organization.
 func (m *Models) RenameOrganization(id primitive.ObjectID, name string) (*Organization, error) {

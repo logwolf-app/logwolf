@@ -25,7 +25,8 @@ toolbox/
 │   ├── consumer.go  # RabbitMQ message consumer: manual acks, retries
 │   └── logger_client.go # The consumer's one reused RPC connection to Logger
 ├── limits/
-│   └── limits.go    # LimitsProvider: what an edition lets a project do
+│   ├── limits.go    # LimitsProvider: what an edition lets a project do
+│   └── plans.go     # The plans, in code: what each lets an organization do
 ├── rabbitmq/
 │   └── connect.go   # RabbitMQ connection initialisation
 └── json/
@@ -102,6 +103,7 @@ An `OrganizationMember` is a user's membership: `organization_id`, `user_id` (th
 
 - `CreateOrganizationWithOwner` inserts an organization and its first owner's membership in one transaction; it refuses one without a name or a plan (`ErrInvalidOrganization`) or an owner (`ErrInvalidUser`). `RenameOrganization` changes the name alone.
 - `RemoveOrganizationMember` and `UpdateOrganizationMemberRole` take the membership's own `_id` and run in a transaction that writes to the organization's document first, as `changeMembers` does for projects (both go through `changeMembersOf`), so two concurrent changes can never leave an organization without an owner: the loser gets `ErrLastOrganizationOwner`. An admin is not an owner, and does not count as one.
+- `ProjectPlan(ctx, projectID)` is the name of the plan of the project's organization, which the hosted edition's `limits.Provider` resolves the project's limits from; `ErrUnknownOrganization` for a project in no organization, or in one that does not exist.
 - `OrganizationRole(orgID, userID)` is the user's role, `""` for a non-member or a missing organization; `OrganizationExists` tells the two apart. `GetOrganizationsForUser` lists the user's organizations with their role in each (`UserOrganization`).
 
 Project roles stay what each project's memberships say. Organization roles do not carry into projects, except one: an organization owner is owner of every project in the organization. `EffectiveProjectRole(projectRole, orgRole)` is that rule.
@@ -145,9 +147,18 @@ Declares the RabbitMQ topology used by all services:
 
 ## `limits` package
 
-`Provider` is the extension point between self-hosted and hosted Logwolf: it answers "may this project ingest `n` more events?" (`AllowIngest`) and "which retention values may it pick?" (`RetentionChoices`). Project ids are hex strings, as services pass them to each other. Every retention choice must be one of `data.ValidRetentionDays`, the only values the logger stores.
+`Provider` is the extension point between self-hosted and hosted Logwolf: it answers "which plan's limits apply to this project?" (`Plan`), "may this project ingest `n` more events?" (`AllowIngest`) and "which retention values may it pick?" (`RetentionChoices`). Project ids are hex strings, as services pass them to each other. Every retention choice must be one of `data.ValidRetentionDays`, the only values the logger stores.
 
-`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which allows any ingest and offers every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` has no provider in this build yet and, like any unknown name, is an error, so a hosted deployment never runs on self-hosted limits by accident. The Broker asks it for retention choices; the ingest check has no caller yet.
+Plans live in code (`plans.go`), not in the database: an organization stores only its plan's name (`organizations.plan`), and `PlanByName` turns that into a `Plan`: `MonthlyEvents`, `MaxRetentionDays`, `MaxProjects` and `MaxMembers`, where `Unlimited` (0) sets no limit, and for retention allows forever. A plan's `RetentionChoices` are every supported value up to its maximum, in the dashboard's order, forever first and only when there is no maximum.
+
+| Plan         | Monthly events | Max retention | Max projects | Max members |
+| ------------ | -------------- | ------------- | ------------ | ----------- |
+| `selfhosted` | unlimited      | forever       | unlimited    | unlimited   |
+| `free`       | 100,000        | 30 days       | 3            | 3           |
+| `pro`        | 5,000,000      | 90 days       | 20           | 20          |
+| `team`       | 25,000,000     | 365 days      | unlimited    | unlimited   |
+
+`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which puts every project on the one `selfhosted` plan without looking anything up: any ingest, and every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` is `Organizations`, which resolves a project's plan through a `PlanLookup` the service supplies (the Broker's asks the logger, `RPCServer.ProjectPlan`). A plan name not in the table is an error, never a plan without limits, and so is `cloud` without a lookup, or any unknown edition, so a hosted deployment never runs on self-hosted limits by accident. Events are not counted yet, so `Organizations.AllowIngest` allows them all. The Broker asks the provider for retention choices; the ingest check has no caller yet.
 
 ## `rabbitmq` package
 

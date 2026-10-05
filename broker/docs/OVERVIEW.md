@@ -142,7 +142,9 @@ the handler's choosing:
 Retention days are checked against the project's choices before the logger is
 called: what the edition's `limits.Provider` offers it (`Config.Limits`; a
 `Config` without one is self-hosted, which offers every one of
-`data.ValidRetentionDays`). Anything else is a 400, and so is a missing `days`,
+`data.ValidRetentionDays`). The hosted edition's offers the retention of the
+plan of the project's organization, which it asks the logger for
+(`projectPlan`, in `plans.go`, over a connection of its own). Anything else is a 400, and so is a missing `days`,
 rather than 0 (keep forever). `GET` and `PATCH` both answer with the choices, so
 the dashboard lists what the project may pick. A provider that fails is a 500.
 

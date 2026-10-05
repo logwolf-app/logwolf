@@ -27,6 +27,7 @@ func TestClassifyRPCError(t *testing.T) {
 		{data.ErrKeyNotFound.Error(), rpcErrNotFound},
 		{"RemoveProjectMember: " + data.ErrLastOwner.Error(), rpcErrLastOwner},
 		{"OrganizationAccess: invalid organization ID: the provided hex string is not a valid ObjectID", rpcErrNotFound},
+		{"CreateProjectWithOwner: " + data.ErrUnknownOrganization.Error() + ": 0000000000000000000000a1", rpcErrNotFound},
 		{"RemoveOrganizationMember: " + data.ErrLastOrganizationOwner.Error(), rpcErrLastOwner},
 		{"UpdateOrganizationMemberRole: " + data.ErrOwnerRequired.Error(), rpcErrOwnerRequired},
 		{"connection is shut down", rpcErrInternal},

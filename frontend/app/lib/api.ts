@@ -36,6 +36,8 @@ export type Project = {
 	id: string;
 	name: string;
 	slug: string;
+	/** The organization the project belongs to; every project has one once the logger has migrated it. */
+	organization_id?: string;
 	created_at: string;
 };
 
@@ -59,6 +61,51 @@ export type ProjectMember = {
 	github_login: string;
 	role: ProjectRole;
 	created_at: string;
+};
+
+export type OrganizationRole = 'owner' | 'admin' | 'member';
+
+/**
+ * An organization owns projects and holds the plan their limits come from.
+ * `plan` is the plan's name; `getOrganizationPlan` resolves its limits.
+ */
+export type Organization = {
+	id: string;
+	name: string;
+	plan: string;
+	created_at: string;
+};
+
+/** An organization together with the role the requesting user holds in it. */
+export type UserOrganization = Organization & { role: OrganizationRole };
+
+/**
+ * A row of the organization_members collection. Unlike project memberships,
+ * every one names its user by GitHub user ID; `github_login` is for display.
+ */
+export type OrganizationMember = {
+	id: string;
+	organization_id: string;
+	user_id: number;
+	github_login: string;
+	role: OrganizationRole;
+	created_at: string;
+};
+
+/**
+ * An organization's plan, as the broker's `limits.Provider` resolves it, and
+ * how much of it the organization uses. 0 in a limit means the plan sets none;
+ * for `max_retention_days`, forever. Events are not counted yet.
+ */
+export type OrganizationPlan = {
+	plan: {
+		name: string;
+		monthly_events: number;
+		max_retention_days: number;
+		max_projects: number;
+		max_members: number;
+	};
+	usage: { projects: number; members: number };
 };
 
 /** The signed-in user the broker acts for: their GitHub user ID, and their login. */
@@ -99,7 +146,11 @@ export interface IApi {
 	/** Records a sign-in of the signed-in user, with their public email. */
 	upsertCurrentUser(email: string): Promise<User>;
 	getProjects(): Promise<UserProject[]>;
-	createProject(name: string, slug: string): Promise<Project>;
+	/**
+	 * Creates a project owned by the signed-in user in `organizationId`, or,
+	 * with none, in the deployment's Default organization.
+	 */
+	createProject(name: string, slug: string, organizationId?: string): Promise<Project>;
 	updateProject(id: string, name: string): Promise<Project>;
 	deleteProject(id: string): Promise<void>;
 	getMembers(projectId: string): Promise<ProjectMember[]>;
@@ -118,6 +169,15 @@ export interface IApi {
 	getLog(projectId: string, id: string): Promise<LogwolfEventData>;
 	createLog(projectId: string, event: EncodedEvent): Promise<void>;
 	deleteLog(projectId: string, id: string): Promise<void>;
+	getOrganizations(): Promise<UserOrganization[]>;
+	updateOrganization(id: string, name: string): Promise<UserOrganization>;
+	getOrganizationPlan(id: string): Promise<OrganizationPlan>;
+	getOrganizationMembers(id: string): Promise<OrganizationMember[]>;
+	addOrganizationMember(id: string, invitee: Invitee, role: OrganizationRole): Promise<void>;
+	/** `memberId` is the membership's `id`. */
+	updateOrganizationMemberRole(id: string, memberId: string, role: OrganizationRole): Promise<void>;
+	/** `memberId` is the membership's `id`. */
+	removeOrganizationMember(id: string, memberId: string): Promise<void>;
 }
 
 export class Api implements IApi {
@@ -161,8 +221,9 @@ export class Api implements IApi {
 		return json.data;
 	}
 
-	public async createProject(name: string, slug: string): Promise<Project> {
-		const res = await fetch(`${this.baseUrl}projects`, {
+	public async createProject(name: string, slug: string, organizationId?: string): Promise<Project> {
+		const path = organizationId ? `organizations/${organizationId}/projects` : 'projects';
+		const res = await fetch(`${this.baseUrl}${path}`, {
 			method: 'POST',
 			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
 			body: JSON.stringify({ name, slug }),
@@ -343,6 +404,81 @@ export class Api implements IApi {
 
 	public async deleteLog(projectId: string, id: string): Promise<void> {
 		const res = await fetch(`${this.baseUrl}projects/${projectId}/logs/${encodeURIComponent(id)}`, {
+			method: 'DELETE',
+			headers: this.internalHeaders(),
+		});
+		const json = (await res.json()) as ApiResponse<void>;
+		if (json.error) throw new Error(json.message);
+	}
+
+	public async getOrganizations(): Promise<UserOrganization[]> {
+		const res = await fetch(`${this.baseUrl}organizations`, {
+			method: 'GET',
+			headers: this.internalHeaders(),
+		});
+		const json = (await res.json()) as ApiResponse<UserOrganization[]>;
+		if (json.error) throw new Error(json.message);
+
+		return json.data ?? [];
+	}
+
+	public async updateOrganization(id: string, name: string): Promise<UserOrganization> {
+		const res = await fetch(`${this.baseUrl}organizations/${id}`, {
+			method: 'PATCH',
+			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
+			body: JSON.stringify({ name }),
+		});
+		const json = (await res.json()) as ApiResponse<UserOrganization>;
+		if (json.error) throw new Error(json.message);
+
+		return json.data;
+	}
+
+	public async getOrganizationPlan(id: string): Promise<OrganizationPlan> {
+		const res = await fetch(`${this.baseUrl}organizations/${id}/plan`, {
+			method: 'GET',
+			headers: this.internalHeaders(),
+		});
+		const json = (await res.json()) as ApiResponse<OrganizationPlan>;
+		if (json.error) throw new Error(json.message);
+
+		return json.data;
+	}
+
+	public async getOrganizationMembers(id: string): Promise<OrganizationMember[]> {
+		const res = await fetch(`${this.baseUrl}organizations/${id}/members`, {
+			method: 'GET',
+			headers: this.internalHeaders(),
+		});
+		const json = (await res.json()) as ApiResponse<OrganizationMember[]>;
+		if (json.error) throw new Error(json.message);
+
+		return json.data ?? [];
+	}
+
+	public async addOrganizationMember(id: string, invitee: Invitee, role: OrganizationRole): Promise<void> {
+		const res = await fetch(`${this.baseUrl}organizations/${id}/members`, {
+			method: 'POST',
+			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
+			body: JSON.stringify({ login: invitee.login, user_id: invitee.id, role }),
+		});
+		const json = (await res.json()) as ApiResponse<void>;
+		if (json.error) throw new Error(json.message);
+	}
+
+	public async updateOrganizationMemberRole(id: string, memberId: string, role: OrganizationRole): Promise<void> {
+		// Encoded like project membership ids: the value reaches us from a form field.
+		const res = await fetch(`${this.baseUrl}organizations/${id}/members/${encodeURIComponent(memberId)}`, {
+			method: 'PATCH',
+			headers: this.internalHeaders({ 'Content-Type': 'application/json' }),
+			body: JSON.stringify({ role }),
+		});
+		const json = (await res.json()) as ApiResponse<void>;
+		if (json.error) throw new Error(json.message);
+	}
+
+	public async removeOrganizationMember(id: string, memberId: string): Promise<void> {
+		const res = await fetch(`${this.baseUrl}organizations/${id}/members/${encodeURIComponent(memberId)}`, {
 			method: 'DELETE',
 			headers: this.internalHeaders(),
 		});

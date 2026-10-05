@@ -1,7 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApi } from '~/lib/api';
-import { context, fakeApi, location, post, project, sessionCookie, sessionSet, thrown } from '~/test/routes';
+import {
+	context,
+	fakeApi,
+	location,
+	organization,
+	post,
+	project,
+	sessionCookie,
+	sessionSet,
+	thrown,
+} from '~/test/routes';
 
 import { action } from './index';
 
@@ -58,6 +68,44 @@ describe('/projects/switch action', () => {
 			expect(err).toMatchObject({ init: { status: 403 } });
 		}
 		expect(api.getProjects).not.toHaveBeenCalled();
+	});
+
+	describe('organizations', () => {
+		const acme = 'ddddddddddddddddddddddd4';
+		const globex = 'eeeeeeeeeeeeeeeeeeeeeee5';
+		const outsider = 'fffffffffffffffffffffff6';
+
+		async function switchFromAcme(projectId: string) {
+			const cookie = await sessionCookie({ currentProjectID: alpha, currentOrganizationID: acme });
+			return action({
+				request: post('/projects/switch', { projectId, redirectTo: '/projects' }, cookie),
+				params: {},
+				context,
+			} as never);
+		}
+
+		beforeEach(() => {
+			api.getProjects.mockResolvedValue([
+				project(alpha, 'owner', 'Alpha', acme),
+				project(beta, 'owner', 'Beta', globex),
+				project('ccccccccccccccccccccccc3', 'member', 'Shared', outsider),
+			]);
+			api.getOrganizations.mockResolvedValue([organization(acme), organization(globex, 'member')]);
+		});
+
+		it('moves into the organization of a project in another of the user’s organizations', async () => {
+			const session = await sessionSet((await switchFromAcme(beta)) as Response);
+
+			expect(session?.get('currentProjectID')).toBe(beta);
+			expect(session?.get('currentOrganizationID')).toBe(globex);
+		});
+
+		it('stays in the organization for a project shared from one the user is not in', async () => {
+			const session = await sessionSet((await switchFromAcme('ccccccccccccccccccccccc3')) as Response);
+
+			expect(session?.get('currentProjectID')).toBe('ccccccccccccccccccccccc3');
+			expect(session?.get('currentOrganizationID')).toBe(acme);
+		});
 	});
 
 	it('sends a signed-out user to sign in', async () => {

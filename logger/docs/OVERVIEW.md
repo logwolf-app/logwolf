@@ -104,7 +104,7 @@ Each log entry stored in MongoDB contains:
 
 `api_keys.project_id`, `settings.project_id` and `project_members.project_id` are ObjectIDs too, as is `organization_members.organization_id`, like `organizations._id`. RPC arguments carry project ids as hex strings; each RPC method parses them (`parseProjectID`) and refuses a malformed one with a `not a valid ObjectID` error, which the broker answers with 404.
 
-`CreateProject` takes the owner's login with the project, and writes both in one transaction (`CreateProjectWithOwner`), inside the deployment's `Default` organization: every project belongs to an organization (`projects.organization_id`, an ObjectID). Until the startup migration has created that organization, `CreateProject` refuses. `UpdateProject` renames only: the slug is fixed at creation.
+`CreateProject` takes the owner's login with the project, and writes both in one transaction (`CreateProjectWithOwner`), inside the organization named by `OrganizationID`, or, with none, the deployment's `Default` organization: every project belongs to an organization (`projects.organization_id`, an ObjectID). A malformed `OrganizationID` is an `invalid organization ID` error and one that names no organization `ErrUnknownOrganization`, both a 404 at the Broker. Without one, until the startup migration has created the `Default` organization, `CreateProject` refuses. `UpdateProject` renames only: the slug is fixed at creation.
 
 ## Retention
 

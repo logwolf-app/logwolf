@@ -133,9 +133,21 @@ func (f *fakeLogger) CreateProject(args *data.RPCCreateProjectArgs, reply *data.
 		return fmt.Errorf("CreateProjectWithOwner owner: injected failure")
 	}
 
+	// No organization named is the Default one, which these tests leave out.
+	var orgID primitive.ObjectID
+	if args.OrganizationID != "" {
+		if err := checkOrganizationID("CreateProject", args.OrganizationID); err != nil {
+			return err
+		}
+		if _, ok := f.orgs[args.OrganizationID]; !ok {
+			return fmt.Errorf("CreateProjectWithOwner: %w: %s", data.ErrUnknownOrganization, args.OrganizationID)
+		}
+		orgID = mustObjectID(args.OrganizationID)
+	}
+
 	// Like the logger, the project and its owner come into being together.
 	id := nextProjectID()
-	p := data.Project{ID: mustObjectID(id), Name: args.Name, Slug: args.Slug}
+	p := data.Project{ID: mustObjectID(id), Name: args.Name, Slug: args.Slug, OrganizationID: orgID}
 	f.projects[id] = p
 	f.members[id] = []data.ProjectMember{{
 		ID: mustObjectID(testMemberID(id, args.Owner)), ProjectID: p.ID, UserID: args.OwnerID, GithubLogin: args.Owner, Role: data.RoleOwner,

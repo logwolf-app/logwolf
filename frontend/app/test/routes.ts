@@ -5,7 +5,7 @@
 
 import { vi } from 'vitest';
 
-import type { IApi, Project, ProjectRole, UserProject } from '~/lib/api';
+import type { IApi, OrganizationRole, Project, ProjectRole, UserOrganization, UserProject } from '~/lib/api';
 import { commitSession, getSession } from '~/lib/session.server';
 import { sealToken } from '~/lib/token.server';
 
@@ -15,7 +15,12 @@ export const CSRF = 'test-csrf-token';
 /** The route context: the event the dashboard reports itself with is absent. */
 export const context = { get: () => null } as never;
 
-type SessionFields = { signedIn?: boolean; currentProjectID?: string; githubToken?: string };
+type SessionFields = {
+	signedIn?: boolean;
+	currentProjectID?: string;
+	currentOrganizationID?: string;
+	githubToken?: string;
+};
 
 /**
  * A Cookie header for a session: signed in as `user`, with a CSRF token, and
@@ -24,12 +29,14 @@ type SessionFields = { signedIn?: boolean; currentProjectID?: string; githubToke
 export async function sessionCookie({
 	signedIn = true,
 	currentProjectID,
+	currentOrganizationID,
 	githubToken,
 }: SessionFields = {}): Promise<string> {
 	const session = await getSession();
 	if (signedIn) session.set('githubUser', user);
 	session.set('csrfToken', CSRF);
 	if (currentProjectID) session.set('currentProjectID', currentProjectID);
+	if (currentOrganizationID) session.set('currentOrganizationID', currentOrganizationID);
 	if (githubToken) session.set('githubToken', sealToken(githubToken));
 	return (await commitSession(session)).split(';')[0]!;
 }
@@ -78,8 +85,28 @@ export function location(res: unknown): string | null {
 	return res instanceof Response ? res.headers.get('Location') : null;
 }
 
-export function project(id: string, role: ProjectRole = 'owner', name = `Project ${id}`): UserProject {
-	return { id, name, slug: name.toLowerCase().replaceAll(' ', '-'), created_at: '2026-01-01T00:00:00Z', role };
+export function project(
+	id: string,
+	role: ProjectRole = 'owner',
+	name = `Project ${id}`,
+	organizationId?: string,
+): UserProject {
+	return {
+		id,
+		name,
+		slug: name.toLowerCase().replaceAll(' ', '-'),
+		organization_id: organizationId,
+		created_at: '2026-01-01T00:00:00Z',
+		role,
+	};
+}
+
+export function organization(
+	id: string,
+	role: OrganizationRole = 'owner',
+	name = `Organization ${id}`,
+): UserOrganization {
+	return { id, name, plan: 'selfhosted', created_at: '2026-01-01T00:00:00Z', role };
 }
 
 /**
@@ -107,6 +134,13 @@ export function fakeApi(overrides: Partial<IApi> = {}): { [K in keyof IApi]: Ret
 		'getLog',
 		'createLog',
 		'deleteLog',
+		'getOrganizations',
+		'updateOrganization',
+		'getOrganizationPlan',
+		'getOrganizationMembers',
+		'addOrganizationMember',
+		'updateOrganizationMemberRole',
+		'removeOrganizationMember',
 	];
 	const api = Object.fromEntries(
 		methods.map((m) => [m, vi.fn(overrides[m] ?? (async () => Promise.reject(new Error(`unexpected call: ${m}`))))]),

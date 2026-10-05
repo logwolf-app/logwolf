@@ -207,6 +207,19 @@ func TestCreateProject_RequiresOwner(t *testing.T) {
 	}
 }
 
+// TestCreateProject_MalformedOrganizationID: an organization id that is not an
+// ObjectID names no organization, and the error says so in the words the
+// broker reads as a 404.
+func TestCreateProject_MalformedOrganizationID(t *testing.T) {
+	srv := &RPCServer{} // zero-value models: reaching MongoDB would panic
+
+	var reply data.Project
+	err := srv.CreateProject(&data.RPCCreateProjectArgs{Name: "App", Slug: "app", OwnerID: 583231, Owner: "octocat", OrganizationID: "not-an-id"}, &reply)
+	if err == nil || !strings.Contains(err.Error(), "invalid organization ID") || !strings.Contains(err.Error(), "not a valid ObjectID") {
+		t.Errorf("CreateProject in a malformed organization: want \"invalid organization ID\", got %v", err)
+	}
+}
+
 // TestAddMember_RequiresAUser: a new membership names its user by GitHub user
 // ID, so one without a usable ID, or without a login to show, is refused before
 // the database.

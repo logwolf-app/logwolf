@@ -68,6 +68,7 @@ func (app *Config) routes() http.Handler {
 		orgMember, orgAdmin := app.requireOrganization(anyMember), app.requireOrganization(adminOnly)
 		r.With(orgMember).Get("/organizations/{id}", app.GetOrganization)
 		r.With(orgAdmin).Patch("/organizations/{id}", app.UpdateOrganization)
+		r.With(orgMember).Post("/organizations/{id}/projects", app.CreateOrganizationProject)
 		r.With(orgMember).Get("/organizations/{id}/plan", app.GetOrganizationPlan)
 		r.With(orgMember).Get("/organizations/{id}/members", app.ListOrganizationMembers)
 		r.With(orgAdmin).Post("/organizations/{id}/members", app.AddOrganizationMember)

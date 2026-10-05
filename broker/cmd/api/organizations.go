@@ -235,6 +235,22 @@ func (app *Config) UpdateOrganization(w http.ResponseWriter, r *http.Request) {
 	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Message: "Organization updated.", Data: data.UserOrganization{Organization: org, Role: o.role}})
 }
 
+// CreateOrganizationProject creates a project in the organization, owned by the
+// caller. Any member of the organization may: the organization's role grants
+// nothing in the project, so the caller's owner membership is what lets them
+// in, like a project created with POST /projects.
+func (app *Config) CreateOrganizationProject(w http.ResponseWriter, r *http.Request) {
+	o := organizationFromContext(r)
+
+	args, ok := app.readNewProject(w, r)
+	if !ok {
+		return
+	}
+	args.OrganizationID = o.id
+
+	app.createProject(w, o.client, args)
+}
+
 // planResponse is a plan's limits as the dashboard reads them. 0 (Unlimited)
 // in any limit means the plan sets none; for max_retention_days, forever.
 type planResponse struct {

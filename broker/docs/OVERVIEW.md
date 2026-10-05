@@ -49,7 +49,7 @@ Everything that acts on one project is under `/projects/{id}`, and on one organi
 | -------- | ----------------------------------- | ------ | ----------------------------------------------------------- |
 | `PUT`    | `/users/me`                         | —      | Record a sign-in (below)                                    |
 | `GET`    | `/projects`                         | —      | Projects the caller belongs to, with `role`                 |
-| `POST`   | `/projects`                         | —      | Create a project, owned by the caller                       |
+| `POST`   | `/projects`                         | —      | Create a project in the Default organization, caller-owned  |
 | `GET`    | `/projects/{id}`                    | member | Get one project                                             |
 | `PATCH`  | `/projects/{id}`                    | owner  | Rename a project (the slug stays)                           |
 | `DELETE` | `/projects/{id}`                    | owner  | Delete a project and everything under it                    |
@@ -74,6 +74,7 @@ Everything that acts on one project is under `/projects/{id}`, and on one organi
 | `POST`   | `/organizations`                         | —      | Create an organization, owned by the caller: `{"name"}`            |
 | `GET`    | `/organizations/{id}`                    | member | Get one organization, with the caller's `role`                     |
 | `PATCH`  | `/organizations/{id}`                    | admin  | Rename an organization (the plan stays)                            |
+| `POST`   | `/organizations/{id}/projects`           | member | Create a project in the organization, owned by the caller          |
 | `GET`    | `/organizations/{id}/plan`               | member | The plan's limits and the organization's usage (below)             |
 | `GET`    | `/organizations/{id}/members`            | member | List members                                                       |
 | `POST`   | `/organizations/{id}/members`            | admin  | Add a member: `{"login", "user_id", "role"}`; an owner, owner-only |
@@ -121,11 +122,16 @@ Admins manage an organization's members, but only owners decide who the owners a
 
 A new organization starts on the plan the edition picks (`limits.Provider.NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted), never one from the request. `GET /organizations/{id}/plan` answers `{"plan": {"name", "monthly_events", "max_retention_days", "max_projects", "max_members"}, "usage": {"projects", "members"}}`, the plan resolved by the edition from the name the organization stores (`OrganizationPlan`: self-hosted is always the one unlimited plan; hosted, a name not in the table is a 500, never a plan without limits). A limit of 0 is none. Events are not counted yet, so usage has no events.
 
-Creating a project is one logger call: the logger writes the project and the
-caller's owner membership in one transaction, so a failure leaves no project
-behind that nobody could reach. Slugs are display labels, fixed at creation and
-not unique, so creating a project never reveals that someone else's has the same
-one.
+Creating a project is one logger call, `POST /projects` and
+`POST /organizations/{id}/projects` alike (`{"name", "slug"}`; the second
+names the organization in `RPCCreateProjectArgs.OrganizationID`, the first
+leaves it to the logger's Default organization). Any member of an organization
+may create a project in it: the organization role grants nothing in the
+project, so the creator's owner membership is what lets them in. The logger
+writes the project and the caller's owner membership in one transaction, so a
+failure leaves no project behind that nobody could reach. Slugs are display
+labels, fixed at creation and not unique, so creating a project never reveals
+that someone else's has the same one.
 
 Renaming or deleting a project and adding, removing or changing the role of a
 member are owner-only. A project always keeps one owner: removing or demoting the last one is a 400

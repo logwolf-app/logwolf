@@ -5,6 +5,7 @@ export default [
 	route('auth', 'pages/auth/index.tsx'),
 
 	route('projects/switch', 'pages/projects/switch/index.tsx'),
+	route('organizations/switch', 'pages/organizations/switch/index.tsx'),
 
 	layout('pages/layout.tsx', [
 		route('dashboard', 'pages/dashboard/index.tsx'),
@@ -16,5 +17,6 @@ export default [
 		route('projects', 'pages/projects/index.tsx'),
 		route('projects/new', 'pages/projects/new/index.tsx'),
 		route('projects/:id/settings', 'pages/projects/settings/index.tsx'),
+		route('organizations/:id/settings', 'pages/organizations/settings/index.tsx'),
 	]),
 ] satisfies RouteConfig;

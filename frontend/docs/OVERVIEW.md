@@ -25,7 +25,8 @@ app/
 ├── context.ts            # React context for event tracking
 ├── app.css               # Global Tailwind CSS
 ├── components/
-│   ├── nav/              # Header, sidebar, theme picker, page wrapper
+│   ├── nav/              # Header, sidebar, organization and project switchers, page wrapper
+│   ├── settings/         # Layout and action result shared by the settings pages
 │   └── ui/               # 25+ reusable UI primitives (button, table, dialog, etc.)
 ├── pages/
 │   ├── layout.tsx        # Authenticated layout wrapper
@@ -35,6 +36,7 @@ app/
 │   ├── events/           # Event list, detail view, create form
 │   ├── keys/             # API key management
 │   ├── projects/         # Project list, create, switch, per-project settings
+│   ├── organizations/    # Organization switch and settings
 │   └── settings/         # Redirect to the current project's settings
 ├── lib/
 │   ├── api.ts            # Dashboard API client (calls Broker internal routes)
@@ -47,11 +49,14 @@ app/
 │   ├── csrf.server.ts    # CSRF token generation + validation
 │   ├── format.ts         # Formatting utilities (dates, numbers)
 │   ├── parse.ts          # Parsing utilities
+│   ├── organizations.ts  # Current organization and project, projects in view, roles
+│   ├── redirect.ts       # Keeps the switchers' redirects on this origin
 │   ├── slug.ts           # Project name -> URL-safe slug
 │   └── utils.ts          # General utilities
 ├── hooks/
 │   ├── use-csrf-token.ts # Fetch CSRF token for form submissions
 │   ├── use-projects.ts   # Read the user's projects from the layout loader
+│   ├── use-organizations.ts # Read the user's organizations from the layout loader
 │   └── use-mobile.ts     # Detect mobile viewport
 └── store/
     └── theme-provider.tsx # Dark/light mode provider (next-themes)
@@ -59,28 +64,30 @@ app/
 
 ## Routes
 
-| Path                     | Auth      | Description                                 |
-| ------------------------ | --------- | ------------------------------------------- |
-| `/`                      | Public    | Landing page                                |
-| `/auth`                  | Public    | GitHub OAuth login                          |
-| `/dashboard`             | Protected | Metrics overview with charts                |
-| `/events`                | Protected | Paginated event list                        |
-| `/events/new`            | Protected | Create a new event                          |
-| `/events/:id`            | Protected | Event detail view                           |
-| `/keys`                  | Protected | API keys and their scopes                   |
-| `/settings`              | Protected | Redirects to the current project's settings |
-| `/projects`              | Protected | Projects the user belongs to                |
-| `/projects/new`          | Protected | Create a project                            |
-| `/projects/switch`       | Protected | POST-only project switch                    |
-| `/projects/:id/settings` | Protected | Rename, retention, members, delete          |
+| Path                          | Auth      | Description                                  |
+| ----------------------------- | --------- | -------------------------------------------- |
+| `/`                           | Public    | Landing page                                 |
+| `/auth`                       | Public    | GitHub OAuth login                           |
+| `/dashboard`                  | Protected | Metrics overview with charts                 |
+| `/events`                     | Protected | Paginated event list                         |
+| `/events/new`                 | Protected | Create a new event                           |
+| `/events/:id`                 | Protected | Event detail view                            |
+| `/keys`                       | Protected | API keys and their scopes                    |
+| `/settings`                   | Protected | Redirects to the current project's settings  |
+| `/projects`                   | Protected | Projects the user belongs to                 |
+| `/projects/new`               | Protected | Create a project in the current organization |
+| `/projects/switch`            | Protected | POST-only project switch                     |
+| `/projects/:id/settings`      | Protected | Rename, retention, members, delete           |
+| `/organizations/switch`       | Protected | POST-only organization switch                |
+| `/organizations/:id/settings` | Protected | Rename, plan and usage, members              |
 
 ## Project selection
 
 Every protected page except `/projects/new` is scoped to one project, held in the
 session as `currentProjectID`. The layout loader owns that value: it re-points the
 session when the stored project is gone or the user lost access to it, and it sends
-a user with no projects at all to `/projects/new` — the one page that renders
-without a current project.
+a user with no project in view (no project at all, or none in their organization;
+below) to `/projects/new` — the one page that renders without a current project.
 
 Switching projects is a POST to `/projects/switch`, which re-checks membership
 server-side before writing the session. The sidebar switcher and the `/projects`
@@ -96,6 +103,36 @@ That includes `/events`, which reads and writes through the broker's
 dashboard's own `API_KEY`, which belongs to one fixed project — it could never
 follow the switcher, and it would have shown every user that project's events.
 `lib/logwolf.ts` keeps using it for what it is: the dashboard's own telemetry.
+
+## Organization selection
+
+The organization the user works in is kept in the session too, as
+`currentOrganizationID`, and the layout loader keeps it honest the same way
+(`resolveCurrent` in `app/lib/organizations.ts`): the stored organization while
+the user is still a member of it, else the stored project's, else their first.
+A user in no organization, as most are on a self-hosted deployment, where only
+the `Default` organization's owners belong to it, has none and sees the dashboard
+as before organizations.
+
+The organization decides which projects are in view (`projectGroups`): its own,
+and those shared with the user project by project from organizations they are
+not in, which no organization switch would reach. The current project must be
+one of them, so the layout re-points a project left over from another
+organization, and sends a user with none in view to `/projects/new`. The sidebar
+switches organization above the project switcher, which lists the organization's
+projects and, apart, the shared ones; `/projects` still lists every project.
+
+Switching is a POST to `/organizations/switch`, which re-checks membership like
+the project switch, and moves the session to the organization's first project
+(or none, for the layout to settle) unless the current one is already in it. It
+lands on the same page when that page only reads the session, the new
+organization's settings from another's, and `/dashboard` otherwise
+(`pathAfterOrganizationSwitch`). Opening a project of another of the user's
+organizations through `/projects/switch` moves them into that organization.
+
+`/projects/new` creates the project in the organization in session
+(`POST /organizations/{id}/projects`), which any member may; a user in no
+organization creates it through `POST /projects`, in the `Default` one.
 
 ## Project settings
 
@@ -144,6 +181,21 @@ membership, and a user it cannot clear gets a warning that allows for private
 membership. The same warning, worded for it, covers GitHub failing the org
 check after the user lookup answered: that never blocks an owner.
 
+## Organization settings
+
+`/organizations/:id/settings` resolves the `:id` against the caller's own
+organizations (anyone else goes back to `/dashboard`), and shows the name, the
+plan with its usage (`getOrganizationPlan`: projects and members against the
+plan's limits, where 0 is unlimited; monthly events and the longest retention,
+which are not counted yet), and the members. Owners and admins rename it and
+manage members; only owners add, promote, demote or remove an owner, so an admin
+sees an owner's row without controls and cannot pick `owner` when adding. The
+broker enforces all of it, and the action repeats what the form alone shows (the
+caller's role, the role asked for); whether a change touches an owner only the
+broker knows, and its refusal is what the page shows. Members are added through
+the same GitHub check as project members (`checkInvitee`, `inviteeFromCheck`),
+by user ID, and named by their membership's `id` afterwards.
+
 ## Authentication
 
 1. User initiates login via GitHub OAuth 2.0.
@@ -175,7 +227,7 @@ CSRF tokens are required on all mutating form submissions.
 
 `lib/api.ts` exports an `Api` class that calls Broker's **internal routes** using the `X-Internal-Secret` header (sourced from `INTERNAL_API_SECRET`). The frontend never calls the public Broker routes — those are for SDK clients only.
 
-The client is request-scoped: `createApi(user)` takes the signed-in user (the session's `githubUser`) and sends their GitHub user ID as `X-User-ID` and their login as `X-User-Login` on every call. The broker checks project membership against the user ID; the login only finds memberships stored before user IDs. Project-scoped methods (`getKeys`, `createKey`, `deleteKey`, `getMetrics`, `getRetention`, `updateRetention`, `getLogs`, `getLog`, `createLog`, `deleteLog`, and everything under `projects`) take the project id as an argument, so a route has to state which project it means; they all call the broker's `/projects/{id}/...` routes.
+The client is request-scoped: `createApi(user)` takes the signed-in user (the session's `githubUser`) and sends their GitHub user ID as `X-User-ID` and their login as `X-User-Login` on every call. The broker checks project membership against the user ID; the login only finds memberships stored before user IDs. Project-scoped methods (`getKeys`, `createKey`, `deleteKey`, `getMetrics`, `getRetention`, `updateRetention`, `getLogs`, `getLog`, `createLog`, `deleteLog`, and everything under `projects`) take the project id as an argument, so a route has to state which project it means; they all call the broker's `/projects/{id}/...` routes. The organization methods (`getOrganizations`, `updateOrganization`, `getOrganizationPlan` and the `*OrganizationMember*` ones) do the same with `/organizations/{id}/...`, and `createProject` takes an optional organization id, which sends it to `POST /organizations/{id}/projects` rather than `POST /projects`.
 
 Event payloads come back exactly as the broker stores them, so `getLogs`/`getLog` decode them with the SDK's own `LogwolfEventSchema` — `data` back into an object, timestamps back into `Date`s. Pages therefore keep working with `LogwolfEventData`, unchanged by the move off the SDK transport.
 
@@ -215,7 +267,7 @@ Vitest runs in node (`vitest.config.ts`) and covers the server side, where acces
 - **Libraries:** the allowlist and invite check, retention, and `lib/api.ts`, whose tests check every project-scoped call names the project in the path, sends the internal secret and the user's login, and encodes what it puts in a path.
 - **Route loaders and actions** (`*.test.ts` next to each route), called the way React Router calls them. Requests carry a real signed session cookie, built by the helpers in `app/test/routes.ts`, so sessions and CSRF are the real code. Only the broker client (`createApi`) is replaced, by `fakeApi`, whose every method rejects unless the test stubs it, and GitHub's API is stubbed on `fetch` where a test needs it.
 
-Covered: the layout's session repair and first-project redirect, the project switcher (membership, CSRF, open redirects), project settings (owner-only intents, retention, invites, delete), keys and event pages (always the project in session, whatever the form says). Components are not rendered in tests.
+Covered: the layout's session repair and first-project redirect, organization selection and the projects in view, the project and organization switchers (membership, CSRF, open redirects), creating a project in the organization in session, project settings (owner-only intents, retention, invites, delete), organization settings (admin-only intents, owner-only owners, invites), keys and event pages (always the project in session, whatever the form says). Components are not rendered in tests.
 
 ## Relationship to other services
 

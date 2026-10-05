@@ -253,3 +253,57 @@ func TestOrganizationRoutes_EndToEnd(t *testing.T) {
 		t.Errorf("plan = %+v, want the self-hosted plan, no limits, 1 project and 2 members", plan)
 	}
 }
+
+// TestOrganizationProjects_EndToEnd: a member of an organization creates a
+// project in it, through the broker, and owns it; an outsider cannot.
+func TestOrganizationProjects_EndToEnd(t *testing.T) {
+	stack := sharedStack(t)
+	users := identityUsers(3)
+	owner, member, outsider := users[0], users[1], users[2]
+
+	status, raw := owner.call(t, stack, http.MethodPost, "/organizations", map[string]any{"name": "Project Org"})
+	if status != http.StatusCreated {
+		t.Fatalf("create organization = %d, want 201 (data: %s)", status, raw)
+	}
+	var org data.UserOrganization
+	if err := json.Unmarshal(raw, &org); err != nil {
+		t.Fatalf("decode organization: %v", err)
+	}
+	base := "/organizations/" + org.ID.Hex()
+
+	if status, raw := owner.call(t, stack, http.MethodPost, base+"/members",
+		map[string]any{"login": member.login, "user_id": member.id, "role": data.RoleMember}); status != http.StatusCreated {
+		t.Fatalf("add member = %d, want 201 (data: %s)", status, raw)
+	}
+
+	if status, raw := outsider.call(t, stack, http.MethodPost, base+"/projects",
+		map[string]any{"name": "Intruder", "slug": "intruder"}); status != http.StatusForbidden {
+		t.Errorf("outsider creates a project = %d, want 403 (data: %s)", status, raw)
+	}
+
+	status, raw = member.call(t, stack, http.MethodPost, base+"/projects", map[string]any{"name": "In Org", "slug": "in-org"})
+	if status != http.StatusCreated {
+		t.Fatalf("member creates a project = %d, want 201 (data: %s)", status, raw)
+	}
+	var project data.Project
+	if err := json.Unmarshal(raw, &project); err != nil {
+		t.Fatalf("decode project: %v", err)
+	}
+	if project.OrganizationID != org.ID {
+		t.Errorf("project's organization = %s, want %s", project.OrganizationID.Hex(), org.ID.Hex())
+	}
+
+	// The creator owns it; the organization's owner does too, through the
+	// organization.
+	assertProjectAccess(t, stack, "creator", member, project.ID.Hex(), data.RoleOwner)
+	assertProjectAccess(t, stack, "organization owner", owner, project.ID.Hex(), data.RoleOwner)
+	assertProjectAccess(t, stack, "outsider", outsider, project.ID.Hex(), "")
+
+	status, raw = member.call(t, stack, http.MethodGet, base+"/plan", nil)
+	var plan struct {
+		Usage data.OrganizationUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(raw, &plan); status != http.StatusOK || err != nil || plan.Usage.Projects != 1 {
+		t.Errorf("plan = %d %s, want 1 project in use", status, raw)
+	}
+}

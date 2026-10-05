@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -383,7 +384,7 @@ func TestCreateOrganization_RefusesBadInput(t *testing.T) {
 		if err := srv.CreateOrganization(&args, &reply); err == nil {
 			t.Errorf("CreateOrganization(%+v) succeeded", args)
 		}
-		if reply != (data.Organization{}) {
+		if !reflect.DeepEqual(reply, data.Organization{}) {
 			t.Errorf("CreateOrganization(%+v): reply should stay empty on error, got %+v", args, reply)
 		}
 	}

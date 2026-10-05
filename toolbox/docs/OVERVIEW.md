@@ -76,7 +76,7 @@ A project's `Slug` is a display label, derived from its name when it is created 
 
 Three operations run in MongoDB transactions, so MongoDB must run as a replica set (a single member is enough, and that is how `docker-compose.yml` and the integration tests run it):
 
-- `CreateProjectWithOwner` inserts a project and its first owner's membership as one unit. A project without an owner could never be reached, since only owners add members.
+- `CreateProjectWithOwner` inserts a project and its first owner's membership as one unit. A project without an owner could never be reached, since only owners add members. The project is created inside `p.OrganizationID` (`organization_id`), which is required and must exist (`ErrUnknownOrganization`); a `project_organization_id` index serves lookups by organization.
 - `DeleteProject` removes the project's API keys, settings, members and the project itself as one unit. A failure part-way rolls the whole thing back. The logs are left out, since a big project's would outlast the transaction; `PurgeProjectLogs` deletes them afterwards and refuses (`ErrProjectExists`) for a project that still exists.
 - `RemoveProjectMember` and `UpdateProjectMemberRole` count the owners and remove or demote the member in one transaction (`changeMembers`), and write to the project document first (`members_updated_at`). A transaction on its own would still let two concurrent removals or demotions of different owners both pass the count. The write to a shared document forces a write conflict, `WithTransaction` retries the loser, and the retry sees `ErrLastOwner`. Setting the role a member already holds is a no-op.
 
@@ -106,9 +106,11 @@ An `OrganizationMember` is a user's membership: `organization_id`, `user_id` (th
 
 Project roles stay what each project's memberships say. Organization roles do not carry into projects, except one: an organization owner is owner of every project in the organization. `EffectiveProjectRole(projectRole, orgRole)` is that rule.
 
+Every project belongs to an organization. The deployment has one the startup migration creates, `Default` (`DefaultOrganizationName`, on `SelfHostedPlan`), found by its `Default` flag, which a partial unique index (`unique_default`, from `EnsureOrganizationIndexes`) allows on one organization only; `GetDefaultOrganization` returns it. Its owners can include logins nobody has signed in under yet, which no membership can name, so those are kept on the organization as `pending_owners`. `ClaimPendingOwnerships(githubID, login)` runs at each sign-in, like `LinkMemberships`: it makes the user an owner of each organization waiting for their login (promoting a member), and takes the login off the list, in a transaction serialized with the organization's other member changes. A `pending_owners` index serves the lookup.
+
 ### Startup migration (`migrate.go`)
 
-Adopts data written before projects existed. Logger calls it on every start; Broker and Listener never do.
+Adopts data written before projects existed, and projects created before organizations. Logger calls it on every start; Broker and Listener never do.
 
 The owner memberships it writes for `Default` carry a login alone: Logger has no GitHub token, so it cannot tell which account a configured login is. `LinkMemberships` links each at that user's first sign-in. `ensureOwners` only matches memberships not linked yet; it skips a login a linked membership still stores rather than promote it or add a second row next to it.
 
@@ -119,6 +121,7 @@ The owner memberships it writes for `Default` carry a login alone: Logger has no
 | `CountOrphanedDocuments`         | Counts `logs`, `api_keys`, and `settings` documents with no project ID                  |
 | `MigrateOrphansToDefaultProject` | Adopts those documents into the `Default` project, creating it and its owners if needed |
 | `EnsureDefaultProjectOwners`     | Gives an ownerless `Default` project its owners, promoting existing members if listed   |
+| `EnsureDefaultOrganization`      | Creates the `Default` organization, owned by `Default`'s owners, and moves every project without an organization into it |
 | `NormalizeMemberLogins`          | Lowercases stored member logins, merging case-only duplicates into the higher role      |
 | `DropLegacyTTLIndex`             | Removes the global TTL index that predates per-project retention                        |
 | `ParseGithubLogins`              | Splits a comma-separated allowlist into normalized logins (deduplicated ignoring case)  |
@@ -126,6 +129,8 @@ The owner memberships it writes for `Default` carry a login alone: Logger has no
 `MigrateOrphansToDefaultProject` returns a nil `*MigrationReport` when there is nothing to adopt, which is what makes repeated runs a no-op.
 
 That is also why it can't be trusted to add owners on its own. If its owner step fails, or runs with an empty owner list, the next start has no orphans left and returns early. `EnsureDefaultProjectOwners` runs independently of the orphan count and only acts while `Default` has no owner. It returns a nil `*OwnerRepair` when there is no `Default` project or it already has an owner.
+
+`EnsureDefaultOrganization` runs after it, on every start, fresh installs included, so a first project always has an organization to be created in. It creates the `Default` organization with its owners in one transaction: the `Default` project's owners, as owner members where they are linked to a user ID and as pending owners where they are login-only; or, with no `Default` project or no owner on it, the configured logins, pending. An organization left with neither an owner nor a pending one is given them on a later start, as `EnsureDefaultProjectOwners` does. Then it sets the organization on every project without an `organization_id`. Its `*OrganizationReport` says whether it created the organization, how many owners and pending owners it gave it, how many projects it moved, and whether it is left `Ownerless`.
 
 ## `event` package
 

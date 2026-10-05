@@ -24,9 +24,9 @@ func defaultProjectOwners() []string {
 }
 
 // runStartupMigration converts project ids to ObjectIDs, normalizes member
-// logins and adopts any pre-multi-tenancy data into the Default project, then
-// makes sure that project has an owner. It is silent when there is nothing to
-// do.
+// logins and adopts any pre-multi-tenancy data into the Default project, makes
+// sure that project has an owner, then puts every project in the Default
+// organization. It is silent when there is nothing to do.
 //
 // A failed step is logged and the rest still run where they can; the error
 // joins every failure. Every step is idempotent, so runStartup runs the whole
@@ -102,21 +102,48 @@ func (app *Config) runStartupMigration() (converted bool, err error) {
 		log.Printf("Migration: FAILED to give project %q an owner, will retry: %v", data.DefaultProjectName, err)
 		fail("give Default project an owner", err)
 	}
-	if repair == nil {
-		return converted, errors.Join(errs...)
-	}
-
-	if repair.Owners > 0 {
+	switch {
+	case repair == nil:
+	case repair.Owners > 0:
 		log.Printf("Migration: project %q had no owner; added owners=%d project_id=%s",
 			data.DefaultProjectName, repair.Owners, repair.ProjectID)
-		return converted, errors.Join(errs...)
-	}
-
-	// Not a failure: nothing here can fix it, only configuration can.
-	if len(owners) == 0 {
+	case len(owners) == 0:
+		// Not a failure: nothing here can fix it, only configuration can.
 		log.Printf("Migration: WARNING — project %q has no owner, so nobody can see its data. Set LOGWOLF_ALLOWED_GITHUB_USERS or LOGWOLF_DEFAULT_PROJECT_OWNERS on Logger and restart it to add owners",
 			data.DefaultProjectName)
 	}
 
+	// After the Default project's owner steps: its owners are the organization's.
+	org, err := app.Models.EnsureDefaultOrganization(ctx, owners)
+	if err != nil {
+		log.Printf("Migration: FAILED to put every project in organization %q, will retry: %v", data.DefaultOrganizationName, err)
+		fail("put every project in an organization", err)
+	}
+	if org != nil {
+		logOrganizationReport(org)
+	}
+
 	return converted, errors.Join(errs...)
+}
+
+// logOrganizationReport says what EnsureDefaultOrganization did, and nothing
+// when it did nothing.
+func logOrganizationReport(org *data.OrganizationReport) {
+	switch {
+	case org.Created:
+		log.Printf("Migration: created organization %q organization_id=%s owners=%d pending_owners=%d",
+			data.DefaultOrganizationName, org.OrganizationID, org.Owners, org.PendingOwners)
+	case org.Owners > 0 || org.PendingOwners > 0:
+		log.Printf("Migration: organization %q had no owner; added owners=%d pending_owners=%d organization_id=%s",
+			data.DefaultOrganizationName, org.Owners, org.PendingOwners, org.OrganizationID)
+	}
+	if org.Projects > 0 {
+		log.Printf("Migration: moved projects=%d into organization %q organization_id=%s",
+			org.Projects, data.DefaultOrganizationName, org.OrganizationID)
+	}
+	// Not a failure either: its projects work as they did, but nobody can manage it.
+	if org.Ownerless {
+		log.Printf("Migration: WARNING — organization %q has no owner. Set LOGWOLF_ALLOWED_GITHUB_USERS or LOGWOLF_DEFAULT_PROJECT_OWNERS on Logger and restart it to add owners",
+			data.DefaultOrganizationName)
+	}
 }

@@ -19,9 +19,20 @@ const (
 	DefaultProjectSlug = "default"
 )
 
+// The organization the startup migration creates for the deployment and puts
+// every project in. A self-hosted deployment has no plans to pick from, so it
+// is on SelfHostedPlan.
+const (
+	DefaultOrganizationName = "Default"
+	SelfHostedPlan          = "selfhosted"
+)
+
 // defaultProjectIndexName is the partial unique index that allows one project
-// with the Default flag.
-const defaultProjectIndexName = "unique_default"
+// with the Default flag; defaultOrganizationIndexName is the organizations'.
+const (
+	defaultProjectIndexName      = "unique_default"
+	defaultOrganizationIndexName = "unique_default"
+)
 
 // legacySlugIndexName is the unique index slugs had while they were globally
 // unique. MarkDefaultProject drops it.
@@ -83,6 +94,23 @@ type MigrationReport struct {
 type OwnerRepair struct {
 	ProjectID string
 	Owners    int64
+}
+
+// OrganizationReport summarises one run of EnsureDefaultOrganization: the
+// Default organization, whether this run created it, the owners it gave it,
+// and how many projects it moved into it.
+//
+// Owners counts owner memberships written for users already linked to a user
+// ID; PendingOwners counts logins that become owners at their next sign-in.
+// Ownerless means the organization is left with neither, because there was
+// nobody to make owner.
+type OrganizationReport struct {
+	OrganizationID string
+	Created        bool
+	Owners         int
+	PendingOwners  int
+	Projects       int64
+	Ownerless      bool
 }
 
 // orphanedFilter matches documents written before project scoping existed. A
@@ -221,6 +249,222 @@ func (m *Models) EnsureDefaultProjectOwners(ctx context.Context, owners []string
 	// still have plain members, and one of them may be on the owners list.
 	repair.Owners, err = m.ensureOwners(ctx, project.ID, owners, true)
 	return repair, err
+}
+
+// EnsureDefaultOrganization puts every project in an organization. It creates
+// the deployment's one organization, Default, if there is none yet, and moves
+// into it every project that has no organization: on a deployment upgraded from
+// before organizations, all of them.
+//
+// Default is owned by the Default project's owners. Those linked to a user ID
+// become owners at once; organization memberships need a user ID, so the
+// login-only ones are kept as pending owners, and each becomes one at their
+// next sign-in (ClaimPendingOwnerships). A deployment with no Default project,
+// or an ownerless one, gives the organization owners, the logins Default would
+// get, as pending owners.
+//
+// Like EnsureDefaultProjectOwners, it gives an existing Default organization
+// with no owner and no pending owner those owners, so owners configured after
+// the first start still get there; one with either is left alone.
+//
+// It is idempotent and safe to run on every start: the organization is written
+// with its owners in one transaction, and a run that fails before moving every
+// project leaves the rest for the next.
+func (m *Models) EnsureDefaultOrganization(ctx context.Context, owners []string) (*OrganizationReport, error) {
+	report := &OrganizationReport{}
+
+	org, err := m.getDefaultOrganization(ctx)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		org, err = m.createDefaultOrganization(ctx, owners, report)
+	} else if err == nil {
+		err = m.repairDefaultOrganizationOwners(ctx, org.ID, owners, report)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("EnsureDefaultOrganization: %w", err)
+	}
+	report.OrganizationID = org.ID.Hex()
+
+	result, err := m.client.Database("logs").Collection("projects").UpdateMany(ctx,
+		bson.M{"organization_id": bson.M{"$exists": false}},
+		bson.M{"$set": bson.M{"organization_id": org.ID}},
+	)
+	if err != nil {
+		return report, fmt.Errorf("EnsureDefaultOrganization move projects: %w", err)
+	}
+	report.Projects = result.ModifiedCount
+	return report, nil
+}
+
+// GetDefaultOrganization returns the deployment's Default organization, or an
+// error wrapping mongo.ErrNoDocuments if the startup migration has not created
+// it yet.
+func (m *Models) GetDefaultOrganization() (*Organization, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	return m.getDefaultOrganization(ctx)
+}
+
+func (m *Models) getDefaultOrganization(ctx context.Context) (*Organization, error) {
+	var o Organization
+	if err := m.organizations().FindOne(ctx, bson.M{"default": true}).Decode(&o); err != nil {
+		return nil, fmt.Errorf("getDefaultOrganization: %w", err)
+	}
+	return &o, nil
+}
+
+// createDefaultOrganization creates the Default organization with its owners,
+// in one transaction, and records them in report. If another logger instance
+// created it first, it returns that one and records nothing.
+func (m *Models) createDefaultOrganization(ctx context.Context, configured []string, report *OrganizationReport) (*Organization, error) {
+	owners, pending, err := m.defaultOrganizationOwners(ctx, configured)
+	if err != nil {
+		return nil, err
+	}
+
+	o := Organization{
+		ID:            primitive.NewObjectID(),
+		Name:          DefaultOrganizationName,
+		Plan:          SelfHostedPlan,
+		CreatedAt:     time.Now(),
+		Default:       true,
+		PendingOwners: pending,
+	}
+	docs := make([]any, len(owners))
+	for i, owner := range owners {
+		owner.ID = primitive.NewObjectID()
+		owner.OrganizationID = o.ID
+		owner.CreatedAt = o.CreatedAt
+		docs[i] = owner
+	}
+
+	session, err := m.client.StartSession()
+	if err != nil {
+		return nil, fmt.Errorf("createDefaultOrganization start session: %w", err)
+	}
+	defer session.EndSession(ctx)
+
+	// The ids are fixed before the transaction, so a retry by WithTransaction
+	// writes the same documents again rather than a second organization.
+	_, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (any, error) {
+		if _, err := m.organizations().InsertOne(sc, o); err != nil {
+			return nil, fmt.Errorf("createDefaultOrganization organization: %w", err)
+		}
+		if len(docs) > 0 {
+			if _, err := m.organizationMembers().InsertMany(sc, docs); err != nil {
+				return nil, fmt.Errorf("createDefaultOrganization owners: %w", err)
+			}
+		}
+		return nil, nil
+	})
+	// Another logger instance created it first — the unique_default index caught it.
+	if mongo.IsDuplicateKeyError(err) {
+		return m.getDefaultOrganization(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	report.Created = true
+	report.Owners = len(owners)
+	report.PendingOwners = len(pending)
+	report.Ownerless = len(owners) == 0 && len(pending) == 0
+	return &o, nil
+}
+
+// repairDefaultOrganizationOwners gives the Default organization its owners if
+// it has neither an owner nor a pending one, and records them in report. It is
+// serialized with every other change to the organization's members. A member
+// who is to be an owner is promoted.
+func (m *Models) repairDefaultOrganizationOwners(ctx context.Context, orgID primitive.ObjectID, configured []string, report *OrganizationReport) error {
+	return m.changeOrganizationMembers("EnsureDefaultOrganization", orgID, func(sc mongo.SessionContext, coll *mongo.Collection) error {
+		*report = OrganizationReport{}
+
+		n, err := coll.CountDocuments(sc, bson.M{"organization_id": orgID, "role": RoleOwner})
+		if err != nil {
+			return fmt.Errorf("count owners: %w", err)
+		}
+		var org Organization
+		if err := m.organizations().FindOne(sc, bson.M{"_id": orgID}).Decode(&org); err != nil {
+			return fmt.Errorf("find organization: %w", err)
+		}
+		if n > 0 || len(org.PendingOwners) > 0 {
+			return nil
+		}
+
+		owners, pending, err := m.defaultOrganizationOwners(sc, configured)
+		if err != nil {
+			return err
+		}
+		for _, owner := range owners {
+			if _, err := coll.UpdateOne(sc,
+				bson.M{"organization_id": orgID, "user_id": owner.UserID},
+				bson.M{
+					"$set":         bson.M{"role": RoleOwner},
+					"$setOnInsert": bson.M{"github_login": owner.GithubLogin, "created_at": time.Now()},
+				},
+				options.Update().SetUpsert(true),
+			); err != nil {
+				return fmt.Errorf("owner %d: %w", owner.UserID, err)
+			}
+		}
+		if len(pending) > 0 {
+			if _, err := m.organizations().UpdateOne(sc,
+				bson.M{"_id": orgID},
+				bson.M{"$set": bson.M{"pending_owners": pending}},
+			); err != nil {
+				return fmt.Errorf("pending owners: %w", err)
+			}
+		}
+
+		report.Owners = len(owners)
+		report.PendingOwners = len(pending)
+		report.Ownerless = len(owners) == 0 && len(pending) == 0
+		return nil
+	})
+}
+
+// defaultOrganizationOwners returns who should own the Default organization:
+// the Default project's owners, as owner memberships for those linked to a user
+// ID and as pending logins for the rest. With no Default project, or no owner
+// on it, it is the configured logins, all pending.
+func (m *Models) defaultOrganizationOwners(ctx context.Context, configured []string) ([]OrganizationMember, []string, error) {
+	project, err := m.getDefaultProject(ctx)
+	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil, fmt.Errorf("defaultOrganizationOwners: %w", err)
+	}
+
+	var owners []OrganizationMember
+	var pending []string
+	if project != nil {
+		cursor, err := m.client.Database("logs").Collection("project_members").Find(ctx,
+			bson.M{"project_id": project.ID, "role": RoleOwner})
+		if err != nil {
+			return nil, nil, fmt.Errorf("defaultOrganizationOwners: %w", err)
+		}
+		var members []ProjectMember
+		if err := cursor.All(ctx, &members); err != nil {
+			return nil, nil, fmt.Errorf("defaultOrganizationOwners decode: %w", err)
+		}
+
+		for _, mb := range members {
+			if mb.UserID > 0 {
+				owners = append(owners, OrganizationMember{UserID: mb.UserID, GithubLogin: mb.GithubLogin, Role: RoleOwner})
+			} else {
+				pending = append(pending, NormalizeGithubLogin(mb.GithubLogin))
+			}
+		}
+	}
+	if len(owners) > 0 || len(pending) > 0 {
+		return owners, pending, nil
+	}
+
+	for _, login := range configured {
+		if login = NormalizeGithubLogin(login); login != "" {
+			pending = append(pending, login)
+		}
+	}
+	return nil, pending, nil
 }
 
 // adoptOrphans stamps every project-less document in collection with projectID.

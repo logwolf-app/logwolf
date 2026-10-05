@@ -392,29 +392,18 @@ func (r *RPCServer) UpdateMemberRole(args *data.RPCUpdateMemberRoleArgs, reply *
 
 // ProjectAccess reports whether the project exists and the caller's role in it,
 // the caller being a GitHub user ID with, for memberships not yet linked to a
-// user, their current login. A member's project exists, so only a non-member
-// costs a second query.
+// user, their current login. An owner of the project's organization is owner
+// of the project, member or not (data.AccessToProject).
 func (r *RPCServer) ProjectAccess(args *data.RPCProjectAccessArgs, reply *data.ProjectAccess) error {
 	projectID, err := parseProjectID("ProjectAccess", args.ProjectID)
 	if err != nil {
 		return err
 	}
-	role, err := r.models.MemberRole(projectID, args.UserID, args.GithubLogin)
+	access, err := r.models.AccessToProject(projectID, args.UserID, args.GithubLogin)
 	if err != nil {
 		return err
 	}
-	if role != "" {
-		*reply = data.ProjectAccess{Exists: true, Role: role}
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	exists, err := r.models.ProjectExists(ctx, projectID)
-	if err != nil {
-		return err
-	}
-	*reply = data.ProjectAccess{Exists: exists}
+	*reply = access
 	return nil
 }
 
@@ -565,6 +554,25 @@ func (r *RPCServer) ListOrganizationMembers(args *data.RPCOrganizationIDArgs, re
 	return nil
 }
 
+// OrganizationUsage counts what the organization has of what its plan limits:
+// its projects and members.
+func (r *RPCServer) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *data.OrganizationUsage) error {
+	orgID, err := parseOrganizationID("OrganizationUsage", args.ID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	usage, err := r.models.GetOrganizationUsage(ctx, orgID)
+	if err != nil {
+		log.Println("Error counting organization usage:", err)
+		return err
+	}
+	*reply = usage
+	return nil
+}
+
 // AddOrganizationMember adds the user args.UserID to an organization. A user
 // who is a member already is refused with a duplicate key error.
 func (r *RPCServer) AddOrganizationMember(args *data.RPCAddOrganizationMemberArgs, reply *string) error {
@@ -597,7 +605,7 @@ func (r *RPCServer) RemoveOrganizationMember(args *data.RPCRemoveOrganizationMem
 	if err != nil {
 		return err
 	}
-	if err := r.models.RemoveOrganizationMember(orgID, memberID); err != nil {
+	if err := r.models.RemoveOrganizationMember(orgID, memberID, args.ActorRole); err != nil {
 		log.Println("Error removing organization member:", err)
 		return err
 	}
@@ -618,7 +626,7 @@ func (r *RPCServer) UpdateOrganizationMemberRole(args *data.RPCUpdateOrganizatio
 	if err != nil {
 		return err
 	}
-	if err := r.models.UpdateOrganizationMemberRole(orgID, memberID, args.Role); err != nil {
+	if err := r.models.UpdateOrganizationMemberRole(orgID, memberID, args.Role, args.ActorRole); err != nil {
 		log.Println("Error updating organization member role:", err)
 		return err
 	}

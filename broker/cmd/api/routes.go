@@ -27,7 +27,8 @@ func (app *Config) routes() http.Handler {
 
 	// Dashboard routes — the internal secret and the signed-in user (GitHub user
 	// ID and login), no API key. Everything that acts on one project is under
-	// /projects/{id}; a member is named by their membership's id.
+	// /projects/{id}, and on one organization under /organizations/{id}; a
+	// member is named by their membership's id.
 	mux.Group(func(r chi.Router) {
 		r.Use(app.requireInternalSecret)
 		r.Use(app.requireUserLogin)
@@ -57,6 +58,21 @@ func (app *Config) routes() http.Handler {
 		r.With(member).Get("/projects/{id}/retention", app.GetRetention)
 		r.With(member).Patch("/projects/{id}/retention", app.UpdateRetention)
 		r.With(member).Get("/projects/{id}/metrics", app.GetMetrics)
+
+		// Organizations, likewise: everything that acts on one is under
+		// /organizations/{id}, and requireOrganization answers 404 or 403 for
+		// whoever falls short of the route's level. Owner-only changes to members
+		// (anything that touches an owner) are refused in the handlers.
+		r.Get("/organizations", app.ListOrganizations)
+		r.Post("/organizations", app.CreateOrganization)
+		orgMember, orgAdmin := app.requireOrganization(anyMember), app.requireOrganization(adminOnly)
+		r.With(orgMember).Get("/organizations/{id}", app.GetOrganization)
+		r.With(orgAdmin).Patch("/organizations/{id}", app.UpdateOrganization)
+		r.With(orgMember).Get("/organizations/{id}/plan", app.GetOrganizationPlan)
+		r.With(orgMember).Get("/organizations/{id}/members", app.ListOrganizationMembers)
+		r.With(orgAdmin).Post("/organizations/{id}/members", app.AddOrganizationMember)
+		r.With(orgAdmin).Patch("/organizations/{id}/members/{memberID}", app.UpdateOrganizationMemberRole)
+		r.With(orgAdmin).Delete("/organizations/{id}/members/{memberID}", app.RemoveOrganizationMember)
 	})
 
 	// Protected routes — each also needs its scope on the key

@@ -217,30 +217,30 @@ func TestOrganizationMembers_LastOwner(t *testing.T) {
 	org := createOrganization(t, m, "Solo", 2007, "grace")
 	owner := organizationMemberID(t, m, org.ID, 2007)
 
-	if err := m.RemoveOrganizationMember(org.ID, owner); !errors.Is(err, data.ErrLastOrganizationOwner) {
+	if err := m.RemoveOrganizationMember(org.ID, owner, data.RoleOwner); !errors.Is(err, data.ErrLastOrganizationOwner) {
 		t.Errorf("removing the last owner: want ErrLastOrganizationOwner, got %v", err)
 	}
 	for _, role := range []string{data.RoleAdmin, data.RoleMember} {
-		if err := m.UpdateOrganizationMemberRole(org.ID, owner, role); !errors.Is(err, data.ErrLastOrganizationOwner) {
+		if err := m.UpdateOrganizationMemberRole(org.ID, owner, role, data.RoleOwner); !errors.Is(err, data.ErrLastOrganizationOwner) {
 			t.Errorf("demoting the last owner to %s: want ErrLastOrganizationOwner, got %v", role, err)
 		}
 	}
 	// Setting the role they hold changes nothing, and is no error.
-	if err := m.UpdateOrganizationMemberRole(org.ID, owner, data.RoleOwner); err != nil {
+	if err := m.UpdateOrganizationMemberRole(org.ID, owner, data.RoleOwner, data.RoleOwner); err != nil {
 		t.Errorf("setting the last owner's own role: %v", err)
 	}
 
 	// An admin is not an owner: the organization still has just one.
 	admin := addOrganizationMember(t, m, org.ID, 2008, "heidi", data.RoleAdmin)
-	if err := m.RemoveOrganizationMember(org.ID, owner); !errors.Is(err, data.ErrLastOrganizationOwner) {
+	if err := m.RemoveOrganizationMember(org.ID, owner, data.RoleOwner); !errors.Is(err, data.ErrLastOrganizationOwner) {
 		t.Errorf("removing the last owner beside an admin: want ErrLastOrganizationOwner, got %v", err)
 	}
 
 	// With a second owner, the first may go.
-	if err := m.UpdateOrganizationMemberRole(org.ID, admin, data.RoleOwner); err != nil {
+	if err := m.UpdateOrganizationMemberRole(org.ID, admin, data.RoleOwner, data.RoleOwner); err != nil {
 		t.Fatalf("promoting the admin: %v", err)
 	}
-	if err := m.RemoveOrganizationMember(org.ID, owner); err != nil {
+	if err := m.RemoveOrganizationMember(org.ID, owner, data.RoleOwner); err != nil {
 		t.Errorf("removing an owner beside another: %v", err)
 	}
 
@@ -262,10 +262,10 @@ func TestOrganizationMembers_NotFound(t *testing.T) {
 
 	// A membership of another organization is no membership of this one.
 	for name, id := range map[string]primitive.ObjectID{"unknown": primitive.NewObjectID(), "foreign": foreign} {
-		if err := m.RemoveOrganizationMember(org.ID, id); !errors.Is(err, mongo.ErrNoDocuments) {
+		if err := m.RemoveOrganizationMember(org.ID, id, data.RoleOwner); !errors.Is(err, mongo.ErrNoDocuments) {
 			t.Errorf("RemoveOrganizationMember %s: want mongo.ErrNoDocuments, got %v", name, err)
 		}
-		if err := m.UpdateOrganizationMemberRole(org.ID, id, data.RoleAdmin); !errors.Is(err, mongo.ErrNoDocuments) {
+		if err := m.UpdateOrganizationMemberRole(org.ID, id, data.RoleAdmin, data.RoleOwner); !errors.Is(err, mongo.ErrNoDocuments) {
 			t.Errorf("UpdateOrganizationMemberRole %s: want mongo.ErrNoDocuments, got %v", name, err)
 		}
 	}
@@ -292,7 +292,7 @@ func TestRemoveOrganizationMember_ConcurrentOwners(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				errs[i] = m.RemoveOrganizationMember(org.ID, owner)
+				errs[i] = m.RemoveOrganizationMember(org.ID, owner, data.RoleOwner)
 			}()
 		}
 		close(start)

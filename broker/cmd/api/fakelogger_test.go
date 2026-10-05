@@ -37,6 +37,9 @@ type fakeLogger struct {
 	users     map[int64]data.User             // GitHub user ID -> user
 	plans     map[string]string               // project id hex -> its organization's plan
 
+	orgs       map[string]data.Organization         // organization id hex -> organization
+	orgMembers map[string][]data.OrganizationMember // organization id hex -> members
+
 	// Recorded calls, for asserting what the broker forwarded.
 	getLogsParams   []data.QueryParams
 	retentionArgs   []data.RetentionArgs
@@ -50,6 +53,13 @@ type fakeLogger struct {
 	revokedKeys     []data.RPCRevokeAPIKeyArgs
 	upsertedUsers   []data.RPCUpsertUserArgs
 	accessChecks    int // ProjectAccess calls
+
+	createdOrgs       []data.RPCCreateOrganizationArgs
+	updatedOrgs       []data.RPCUpdateOrganizationArgs
+	addedOrgMembers   []data.RPCAddOrganizationMemberArgs
+	removedOrgMembers []data.RPCRemoveOrganizationMemberArgs
+	orgRoleChanges    []data.RPCUpdateOrganizationMemberRoleArgs
+	orgAccessChecks   int // OrganizationAccess calls
 
 	// Failure injection.
 	failCreateProject bool               // CreateProject fails, as its transaction would, and creates nothing
@@ -91,6 +101,9 @@ func newFakeLogger() *fakeLogger {
 		plaintext: map[string]string{},
 		users:     map[int64]data.User{},
 		plans:     map[string]string{},
+
+		orgs:       map[string]data.Organization{},
+		orgMembers: map[string][]data.OrganizationMember{},
 	}
 }
 
@@ -221,13 +234,18 @@ func (f *fakeLogger) ProjectAccess(args *data.RPCProjectAccessArgs, reply *data.
 	if err := checkObjectID("ProjectAccess", args.ProjectID); err != nil {
 		return err
 	}
-	_, exists := f.projects[args.ProjectID]
+	p, exists := f.projects[args.ProjectID]
 	*reply = data.ProjectAccess{Exists: exists}
+	if !exists {
+		return nil
+	}
 	for _, m := range f.members[args.ProjectID] {
 		if memberIs(m, args.UserID, args.GithubLogin) {
 			reply.Role = m.Role
 		}
 	}
+	// Like data.AccessToProject: an owner of the project's organization owns it.
+	reply.Role = data.EffectiveProjectRole(reply.Role, f.orgRole(p.OrganizationID.Hex(), args.UserID))
 	return nil
 }
 
@@ -482,7 +500,265 @@ func (f *fakeLogger) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) 
 	return nil
 }
 
+// --- Organizations ---
+
+// checkOrganizationID refuses a malformed id the way the logger's organization
+// RPC methods do.
+func checkOrganizationID(op, id string) error {
+	if _, err := primitive.ObjectIDFromHex(id); err != nil {
+		return fmt.Errorf("%s: invalid organization ID: %w", op, err)
+	}
+	return nil
+}
+
+func (f *fakeLogger) OrganizationAccess(args *data.RPCOrganizationAccessArgs, reply *data.OrganizationAccess) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.orgAccessChecks++
+	if err := checkOrganizationID("OrganizationAccess", args.OrganizationID); err != nil {
+		return err
+	}
+	_, exists := f.orgs[args.OrganizationID]
+	*reply = data.OrganizationAccess{Exists: exists, Role: f.orgRole(args.OrganizationID, args.UserID)}
+	return nil
+}
+
+func (f *fakeLogger) GetOrganization(args *data.RPCOrganizationIDArgs, reply *data.Organization) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := checkOrganizationID("GetOrganization", args.ID); err != nil {
+		return err
+	}
+	o, ok := f.orgs[args.ID]
+	if !ok {
+		return fmt.Errorf("GetOrganization: %w", errNoDocuments)
+	}
+	*reply = o
+	return nil
+}
+
+func (f *fakeLogger) CreateOrganization(args *data.RPCCreateOrganizationArgs, reply *data.Organization) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.createdOrgs = append(f.createdOrgs, *args)
+	if args.Name == "" || args.Plan == "" {
+		return fmt.Errorf("CreateOrganizationWithOwner: %w", data.ErrInvalidOrganization)
+	}
+	id := nextProjectID()
+	o := data.Organization{ID: mustObjectID(id), Name: args.Name, Plan: args.Plan}
+	f.orgs[id] = o
+	f.orgMembers[id] = []data.OrganizationMember{{
+		ID: mustObjectID(testMemberID(id, args.Owner)), OrganizationID: o.ID, UserID: args.OwnerID, GithubLogin: args.Owner, Role: data.RoleOwner,
+	}}
+	*reply = o
+	return nil
+}
+
+func (f *fakeLogger) UpdateOrganization(args *data.RPCUpdateOrganizationArgs, reply *data.Organization) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.updatedOrgs = append(f.updatedOrgs, *args)
+	if err := checkOrganizationID("UpdateOrganization", args.ID); err != nil {
+		return err
+	}
+	o, ok := f.orgs[args.ID]
+	if !ok {
+		return fmt.Errorf("RenameOrganization: %w", errNoDocuments)
+	}
+	o.Name = args.Name
+	f.orgs[args.ID] = o
+	*reply = o
+	return nil
+}
+
+func (f *fakeLogger) ListUserOrganizations(args *data.RPCUserOrganizationsArgs, reply *[]data.UserOrganization) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := []data.UserOrganization{}
+	for id, o := range f.orgs {
+		if role := f.orgRole(id, args.UserID); role != "" {
+			out = append(out, data.UserOrganization{Organization: o, Role: role})
+		}
+	}
+	*reply = out
+	return nil
+}
+
+func (f *fakeLogger) ListOrganizationMembers(args *data.RPCOrganizationIDArgs, reply *[]data.OrganizationMember) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := checkOrganizationID("ListOrganizationMembers", args.ID); err != nil {
+		return err
+	}
+	*reply = append([]data.OrganizationMember{}, f.orgMembers[args.ID]...)
+	return nil
+}
+
+func (f *fakeLogger) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *data.OrganizationUsage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := checkOrganizationID("OrganizationUsage", args.ID); err != nil {
+		return err
+	}
+	usage := data.OrganizationUsage{Members: int64(len(f.orgMembers[args.ID]))}
+	for _, p := range f.projects {
+		if p.OrganizationID.Hex() == args.ID {
+			usage.Projects++
+		}
+	}
+	*reply = usage
+	return nil
+}
+
+func (f *fakeLogger) AddOrganizationMember(args *data.RPCAddOrganizationMemberArgs, reply *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.addedOrgMembers = append(f.addedOrgMembers, *args)
+	if err := checkOrganizationID("AddOrganizationMember", args.OrganizationID); err != nil {
+		return err
+	}
+	for _, m := range f.orgMembers[args.OrganizationID] {
+		if m.UserID == args.UserID {
+			return fmt.Errorf("InsertOrganizationMember: %w", errDuplicateKey("unique_organization_member"))
+		}
+	}
+	f.orgMembers[args.OrganizationID] = append(f.orgMembers[args.OrganizationID], data.OrganizationMember{
+		ID:             mustObjectID(testMemberID(args.OrganizationID, args.GithubLogin)),
+		OrganizationID: mustObjectID(args.OrganizationID),
+		UserID:         args.UserID,
+		GithubLogin:    args.GithubLogin,
+		Role:           args.Role,
+	})
+	*reply = "ok"
+	return nil
+}
+
+// findOrgMember returns the index of the membership memberID in the
+// organization, or the error the logger would answer. A change that touches an
+// owner is refused the way the logger refuses it: ErrOwnerRequired unless the
+// actor is an owner, ErrLastOrganizationOwner if it would take away the only
+// one. The caller holds f.mu.
+func (f *fakeLogger) findOrgMember(op, orgID, memberID string, touchesOwner func(data.OrganizationMember) bool, actorRole string) (int, error) {
+	if _, err := primitive.ObjectIDFromHex(memberID); err != nil {
+		return 0, fmt.Errorf("%s: invalid member ID: %w", op, err)
+	}
+	for i, m := range f.orgMembers[orgID] {
+		if m.ID.Hex() != memberID {
+			continue
+		}
+		if !touchesOwner(m) {
+			return i, nil
+		}
+		if actorRole != data.RoleOwner {
+			return 0, fmt.Errorf("%s: %w", op, data.ErrOwnerRequired)
+		}
+		if m.Role == data.RoleOwner {
+			owners := 0
+			for _, other := range f.orgMembers[orgID] {
+				if other.Role == data.RoleOwner {
+					owners++
+				}
+			}
+			if owners <= 1 {
+				return 0, fmt.Errorf("%s: %w", op, data.ErrLastOrganizationOwner)
+			}
+		}
+		return i, nil
+	}
+	return 0, fmt.Errorf("%s: %w", op, errNoDocuments)
+}
+
+func (f *fakeLogger) RemoveOrganizationMember(args *data.RPCRemoveOrganizationMemberArgs, reply *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.removedOrgMembers = append(f.removedOrgMembers, *args)
+	if err := checkOrganizationID("RemoveOrganizationMember", args.OrganizationID); err != nil {
+		return err
+	}
+	isOwner := func(m data.OrganizationMember) bool { return m.Role == data.RoleOwner }
+	i, err := f.findOrgMember("RemoveOrganizationMember", args.OrganizationID, args.MemberID, isOwner, args.ActorRole)
+	if err != nil {
+		return err
+	}
+	members := f.orgMembers[args.OrganizationID]
+	f.orgMembers[args.OrganizationID] = append(members[:i:i], members[i+1:]...)
+	*reply = "ok"
+	return nil
+}
+
+func (f *fakeLogger) UpdateOrganizationMemberRole(args *data.RPCUpdateOrganizationMemberRoleArgs, reply *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.orgRoleChanges = append(f.orgRoleChanges, *args)
+	if err := checkOrganizationID("UpdateOrganizationMemberRole", args.OrganizationID); err != nil {
+		return err
+	}
+	if !data.ValidOrganizationRole(args.Role) {
+		return fmt.Errorf("UpdateOrganizationMemberRole: invalid role %q", args.Role)
+	}
+	touchesOwner := func(m data.OrganizationMember) bool {
+		return m.Role != args.Role && (m.Role == data.RoleOwner || args.Role == data.RoleOwner)
+	}
+	i, err := f.findOrgMember("UpdateOrganizationMemberRole", args.OrganizationID, args.MemberID, touchesOwner, args.ActorRole)
+	if err != nil {
+		return err
+	}
+	f.orgMembers[args.OrganizationID][i].Role = args.Role
+	*reply = "ok"
+	return nil
+}
+
 // --- test-side helpers (unexported, so net/rpc ignores them) ---
+
+// orgRole is the user's role in the organization, "" for none. The caller holds
+// f.mu.
+func (f *fakeLogger) orgRole(orgID string, userID int64) string {
+	for _, m := range f.orgMembers[orgID] {
+		if userID > 0 && m.UserID == userID {
+			return m.Role
+		}
+	}
+	return ""
+}
+
+func (f *fakeLogger) addOrganization(id, name, plan string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.orgs[id] = data.Organization{ID: mustObjectID(id), Name: name, Plan: plan}
+}
+
+// addOrgMember makes the user testUserID(login) a member of the organization,
+// under id testMemberID(orgID, login).
+func (f *fakeLogger) addOrgMember(orgID, login, role string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.orgMembers[orgID] = append(f.orgMembers[orgID], data.OrganizationMember{
+		ID:             mustObjectID(testMemberID(orgID, login)),
+		OrganizationID: mustObjectID(orgID),
+		UserID:         testUserID(login),
+		GithubLogin:    login,
+		Role:           role,
+	})
+}
+
+// putInOrganization moves the project into the organization.
+func (f *fakeLogger) putInOrganization(projectID, orgID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.projects[projectID]
+	p.OrganizationID = mustObjectID(orgID)
+	f.projects[projectID] = p
+}
 
 var keySeq atomic.Int64
 

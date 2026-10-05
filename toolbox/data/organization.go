@@ -25,6 +25,12 @@ var ErrInvalidOrganization = errors.New("invalid organization")
 // whose organization does not exist.
 var ErrUnknownOrganization = errors.New("organization does not exist")
 
+// ErrOwnerRequired is returned when a change to an organization's members would
+// remove, demote or promote an owner, and whoever makes it is not an owner
+// themselves: an admin manages members, but only owners decide who the owners
+// are.
+var ErrOwnerRequired = errors.New("only an owner can change the owners of an organization")
+
 // RoleAdmin is the organization role between owner and member. Projects have no
 // admins: their roles are RoleOwner and RoleMember alone (ValidRole).
 const RoleAdmin = "admin"
@@ -123,18 +129,24 @@ type RPCAddOrganizationMemberArgs struct {
 
 // RPCRemoveOrganizationMemberArgs is the RPC argument for
 // RemoveOrganizationMember. MemberID is the membership's own id
-// (OrganizationMember.ID).
+// (OrganizationMember.ID). ActorRole is the role in the organization of whoever
+// makes the change: anyone but an owner is refused an owner's membership
+// (ErrOwnerRequired).
 type RPCRemoveOrganizationMemberArgs struct {
 	OrganizationID string
 	MemberID       string
+	ActorRole      string
 }
 
 // RPCUpdateOrganizationMemberRoleArgs is the RPC argument for
-// UpdateOrganizationMemberRole. MemberID is the membership's own id.
+// UpdateOrganizationMemberRole. MemberID is the membership's own id. ActorRole
+// is the role in the organization of whoever makes the change, as in
+// RPCRemoveOrganizationMemberArgs.
 type RPCUpdateOrganizationMemberRoleArgs struct {
 	OrganizationID string
 	MemberID       string
 	Role           string
+	ActorRole      string
 }
 
 // RPCOrganizationAccessArgs is the RPC argument for OrganizationAccess: the
@@ -150,6 +162,14 @@ type RPCOrganizationAccessArgs struct {
 type OrganizationAccess struct {
 	Exists bool
 	Role   string
+}
+
+// OrganizationUsage is how much of its plan an organization uses, counted
+// against the plan's limits: its projects and its members. Events are not
+// counted yet.
+type OrganizationUsage struct {
+	Projects int64 `json:"projects"`
+	Members  int64 `json:"members"`
 }
 
 // ValidOrganizationRole reports whether r is a recognised organization member
@@ -419,10 +439,11 @@ func (m *Models) GetOrganizationMembers(orgID primitive.ObjectID) ([]Organizatio
 }
 
 // RemoveOrganizationMember removes the membership memberID from an
-// organization. Returns ErrLastOrganizationOwner if the member is the sole
-// remaining owner, and mongo.ErrNoDocuments if the organization has no such
-// membership.
-func (m *Models) RemoveOrganizationMember(orgID, memberID primitive.ObjectID) error {
+// organization, on behalf of someone whose role in it is actorRole. Returns
+// ErrOwnerRequired if the member is an owner and actorRole is not,
+// ErrLastOrganizationOwner if the member is the sole remaining owner, and
+// mongo.ErrNoDocuments if the organization has no such membership.
+func (m *Models) RemoveOrganizationMember(orgID, memberID primitive.ObjectID, actorRole string) error {
 	return m.changeOrganizationMembers("RemoveOrganizationMember", orgID, func(sc mongo.SessionContext, coll *mongo.Collection) error {
 		var target OrganizationMember
 		if err := coll.FindOne(sc, bson.M{"_id": memberID, "organization_id": orgID}).Decode(&target); err != nil {
@@ -430,6 +451,9 @@ func (m *Models) RemoveOrganizationMember(orgID, memberID primitive.ObjectID) er
 		}
 
 		if target.Role == RoleOwner {
+			if actorRole != RoleOwner {
+				return fmt.Errorf("RemoveOrganizationMember: %w", ErrOwnerRequired)
+			}
 			if err := refuseLastOrganizationOwner(sc, coll, orgID); err != nil {
 				return fmt.Errorf("RemoveOrganizationMember: %w", err)
 			}
@@ -446,11 +470,13 @@ func (m *Models) RemoveOrganizationMember(orgID, memberID primitive.ObjectID) er
 	})
 }
 
-// UpdateOrganizationMemberRole gives the membership memberID a new role.
-// Returns ErrLastOrganizationOwner if that would demote the sole remaining
-// owner, and mongo.ErrNoDocuments if the organization has no such membership.
-// Setting the role a member already holds changes nothing.
-func (m *Models) UpdateOrganizationMemberRole(orgID, memberID primitive.ObjectID, role string) error {
+// UpdateOrganizationMemberRole gives the membership memberID a new role, on
+// behalf of someone whose role in the organization is actorRole. Returns
+// ErrOwnerRequired if the member is an owner, or would become one, and
+// actorRole is not owner; ErrLastOrganizationOwner if that would demote the
+// sole remaining owner; and mongo.ErrNoDocuments if the organization has no
+// such membership. Setting the role a member already holds changes nothing.
+func (m *Models) UpdateOrganizationMemberRole(orgID, memberID primitive.ObjectID, role, actorRole string) error {
 	if !ValidOrganizationRole(role) {
 		return fmt.Errorf("UpdateOrganizationMemberRole: invalid role %q", role)
 	}
@@ -462,6 +488,9 @@ func (m *Models) UpdateOrganizationMemberRole(orgID, memberID primitive.ObjectID
 		}
 		if target.Role == role {
 			return nil
+		}
+		if (target.Role == RoleOwner || role == RoleOwner) && actorRole != RoleOwner {
+			return fmt.Errorf("UpdateOrganizationMemberRole: %w", ErrOwnerRequired)
 		}
 
 		if target.Role == RoleOwner {
@@ -514,6 +543,82 @@ func (m *Models) OrganizationRole(orgID primitive.ObjectID, userID int64) (strin
 		return "", fmt.Errorf("OrganizationRole: %w", err)
 	}
 	return member.Role, nil
+}
+
+// GetOrganizationUsage counts what the organization has of what its plan
+// limits: its projects and its members.
+func (m *Models) GetOrganizationUsage(ctx context.Context, orgID primitive.ObjectID) (OrganizationUsage, error) {
+	projects, err := m.client.Database("logs").Collection("projects").CountDocuments(ctx, bson.M{"organization_id": orgID})
+	if err != nil {
+		return OrganizationUsage{}, fmt.Errorf("GetOrganizationUsage projects: %w", err)
+	}
+	members, err := m.organizationMembers().CountDocuments(ctx, bson.M{"organization_id": orgID})
+	if err != nil {
+		return OrganizationUsage{}, fmt.Errorf("GetOrganizationUsage members: %w", err)
+	}
+	return OrganizationUsage{Projects: projects, Members: members}, nil
+}
+
+// AccessToProject reports whether the project exists and the role in it of the
+// user with this GitHub user ID and current login: their own membership's
+// (MemberRole), or owner if they own the project's organization
+// (EffectiveProjectRole). A project owner costs one query; anyone else also
+// the project's, and their role in its organization.
+func (m *Models) AccessToProject(projectID primitive.ObjectID, userID int64, githubLogin string) (ProjectAccess, error) {
+	role, err := m.MemberRole(projectID, userID, githubLogin)
+	if err != nil {
+		return ProjectAccess{}, err
+	}
+	if role == RoleOwner {
+		return ProjectAccess{Exists: true, Role: role}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var p Project
+	err = m.client.Database("logs").Collection("projects").
+		FindOne(ctx, bson.M{"_id": projectID}, options.FindOne().SetProjection(bson.M{"organization_id": 1})).
+		Decode(&p)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return ProjectAccess{}, nil
+	}
+	if err != nil {
+		return ProjectAccess{}, fmt.Errorf("AccessToProject: %w", err)
+	}
+	if p.OrganizationID.IsZero() {
+		return ProjectAccess{Exists: true, Role: role}, nil
+	}
+
+	orgRole, err := m.OrganizationRole(p.OrganizationID, userID)
+	if err != nil {
+		return ProjectAccess{}, fmt.Errorf("AccessToProject: %w", err)
+	}
+	return ProjectAccess{Exists: true, Role: EffectiveProjectRole(role, orgRole)}, nil
+}
+
+// ownedOrganizations returns the ids of the organizations the user with this
+// GitHub user ID owns, never nil, so it can go into an $in as it is.
+func (m *Models) ownedOrganizations(ctx context.Context, userID int64) ([]primitive.ObjectID, error) {
+	if userID <= 0 {
+		return []primitive.ObjectID{}, nil
+	}
+	cursor, err := m.organizationMembers().Find(ctx, bson.M{"user_id": userID, "role": RoleOwner},
+		options.Find().SetProjection(bson.M{"organization_id": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("ownedOrganizations: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var members []OrganizationMember
+	if err := cursor.All(ctx, &members); err != nil {
+		return nil, fmt.Errorf("ownedOrganizations decode: %w", err)
+	}
+	ids := make([]primitive.ObjectID, len(members))
+	for i, mb := range members {
+		ids[i] = mb.OrganizationID
+	}
+	return ids, nil
 }
 
 // GetOrganizationsForUser returns every organization the user with this GitHub

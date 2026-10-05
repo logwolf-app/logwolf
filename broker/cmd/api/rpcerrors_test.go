@@ -26,6 +26,9 @@ func TestClassifyRPCError(t *testing.T) {
 		{"ListMembers: invalid project ID: the provided hex string is not a valid ObjectID", rpcErrNotFound},
 		{data.ErrKeyNotFound.Error(), rpcErrNotFound},
 		{"RemoveProjectMember: " + data.ErrLastOwner.Error(), rpcErrLastOwner},
+		{"OrganizationAccess: invalid organization ID: the provided hex string is not a valid ObjectID", rpcErrNotFound},
+		{"RemoveOrganizationMember: " + data.ErrLastOrganizationOwner.Error(), rpcErrLastOwner},
+		{"UpdateOrganizationMemberRole: " + data.ErrOwnerRequired.Error(), rpcErrOwnerRequired},
 		{"connection is shut down", rpcErrInternal},
 		{"GetMetrics: context deadline exceeded", rpcErrInternal},
 	}

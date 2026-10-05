@@ -15,6 +15,8 @@ toolbox/
 │   ├── apikey.go    # APIKey model, key generation, validation
 │   ├── settings.go  # Per-project retention settings, index management
 │   ├── project.go   # Project and ProjectMember models, membership queries
+│   ├── organization.go # Organization and OrganizationMember models, membership queries
+│   ├── user.go      # Users, keyed by GitHub user ID
 │   ├── migrate.go   # Startup migration of pre-multi-tenancy data
 │   └── log.go       # Log entry type aliases
 ├── event/
@@ -91,6 +93,18 @@ GitHub logins are case-insensitive, so `project_members` stores them normalized 
 A `User` is someone who has signed in, keyed by their GitHub user ID (`github_id`), which a unique index (`unique_github_id`, from `EnsureUserIndexes`) keeps to one user per account. Logins are not identities: GitHub lets people rename their account, and another account can then take the old name. So `github_login` is only the login the user had at their last sign-in, normalized like membership logins, for display and invites; after a rename two users can briefly share one.
 
 `UpsertUser(githubID, login, email)` records a sign-in: it creates the user, or refreshes the login and email of the existing one, and returns the user as stored. The `_id` and `created_at` never change. An empty email clears a stored one, since the user has made theirs private. Two simultaneous first sign-ins of one account leave one user: the unique index refuses the second insert, which retries as an update. It refuses (`ErrInvalidUser`) a user with no positive GitHub ID or no login. `GetUserByGithubID` returns `mongo.ErrNoDocuments`, wrapped, for someone who has never signed in. Logger exposes both over RPC (`RPCUpsertUserArgs`, `RPCGetUserArgs` → `RPCGetUserReply`).
+
+### Organizations (`organization.go`)
+
+An `Organization` sits above projects: it owns them, holds the plan, and so sets their limits. It stores `name`, `plan` (the plan's name), `billing_customer_id` (the billing provider's id for it, empty on self-hosted deployments, where nothing bills) and `created_at`. `organizations._id` and `organization_members.organization_id` are `primitive.ObjectID`s, like project ids, and every `Models` method takes one; RPC arguments carry them as hex strings.
+
+An `OrganizationMember` is a user's membership: `organization_id`, `user_id` (the GitHub user ID, the key of `users`) and `role`, one of `owner`, `admin` (`RoleAdmin`) or `member` (`ValidOrganizationRole`). Organizations came after user IDs, so unlike project memberships none is login-only: lookups go by `user_id` alone. `github_login` is the login the member was added under, kept for display; `GetOrganizationMembers` lists a member who has signed in under the login of their last sign-in, read from `users`. `EnsureOrganizationIndexes` creates the unique `(organization_id, user_id)` index (`unique_organization_member`), one membership per user per organization, and a `user_id` index for `GetOrganizationsForUser`.
+
+- `CreateOrganizationWithOwner` inserts an organization and its first owner's membership in one transaction; it refuses one without a name or a plan (`ErrInvalidOrganization`) or an owner (`ErrInvalidUser`). `RenameOrganization` changes the name alone.
+- `RemoveOrganizationMember` and `UpdateOrganizationMemberRole` take the membership's own `_id` and run in a transaction that writes to the organization's document first, as `changeMembers` does for projects (both go through `changeMembersOf`), so two concurrent changes can never leave an organization without an owner: the loser gets `ErrLastOrganizationOwner`. An admin is not an owner, and does not count as one.
+- `OrganizationRole(orgID, userID)` is the user's role, `""` for a non-member or a missing organization; `OrganizationExists` tells the two apart. `GetOrganizationsForUser` lists the user's organizations with their role in each (`UserOrganization`).
+
+Project roles stay what each project's memberships say. Organization roles do not carry into projects, except one: an organization owner is owner of every project in the organization. `EffectiveProjectRole(projectRole, orgRole)` is that rule.
 
 ### Startup migration (`migrate.go`)
 

@@ -1,3 +1,5 @@
+import type { Invitee } from './api';
+
 // Who may sign in to the dashboard. A login gets in only if it is in the users
 // allowlist or belongs to an allowed org; with both lists empty, nobody does.
 
@@ -214,4 +216,22 @@ export function inviteWarning(check: InviteeCheck): string | undefined {
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * Who an invite of `login` adds, given what `checkInvitee` learned, or why
+ * nobody can be added. Only a login that cannot be a person is refused; one
+ * the allowlist does not clear is still added (with `inviteWarning`), since an
+ * admin may allowlist them later. The membership belongs to the GitHub user ID
+ * behind the login, so without GitHub's answer there is nobody to add.
+ */
+export function inviteeFromCheck(login: string, check: InviteeCheck): { invitee: Invitee } | { error: string } {
+	if (check.kind === 'unknown') return { error: `There is no GitHub user named ${login}.` };
+	if (check.kind === 'organization') {
+		return { error: `${check.login} is a GitHub organization; only users can be members.` };
+	}
+	if (check.id === undefined) {
+		return { error: `Could not reach GitHub to look up ${check.login}. Try again in a moment.` };
+	}
+	return { invitee: { id: check.id, login: check.login } };
 }

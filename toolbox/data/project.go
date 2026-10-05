@@ -87,12 +87,15 @@ type UserProject struct {
 
 // RPCCreateProjectArgs is the RPC argument for CreateProject. OwnerID and Owner
 // are the GitHub user ID and login of the user who gets the owner membership,
-// created with the project in one transaction.
+// created with the project in one transaction. OrganizationID is the
+// organization to create it in, as hex; empty, the deployment's Default
+// organization.
 type RPCCreateProjectArgs struct {
-	Name    string
-	Slug    string
-	OwnerID int64
-	Owner   string
+	Name           string
+	Slug           string
+	OwnerID        int64
+	Owner          string
+	OrganizationID string
 }
 
 // RPCProjectIDArgs is the RPC argument for calls that take only a project ID.

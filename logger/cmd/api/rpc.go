@@ -201,8 +201,9 @@ func (r *RPCServer) GetMetrics(args *data.ProjectArgs, reply *data.Metrics) erro
 }
 
 // CreateProject creates a project owned by the user args.OwnerID, whose login is
-// args.Owner, inside the deployment's Default organization. The project and the
-// owner membership are written in one transaction, so a failure leaves neither.
+// args.Owner, inside the organization args.OrganizationID, or the deployment's
+// Default organization when it names none. The project and the owner membership
+// are written in one transaction, so a failure leaves neither.
 func (r *RPCServer) CreateProject(args *data.RPCCreateProjectArgs, reply *data.Project) error {
 	if args.Name == "" {
 		return fmt.Errorf("CreateProject: name is required")
@@ -214,23 +215,39 @@ func (r *RPCServer) CreateProject(args *data.RPCCreateProjectArgs, reply *data.P
 		return fmt.Errorf("CreateProject: owner is required")
 	}
 
-	org, err := r.models.GetDefaultOrganization()
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		return fmt.Errorf("CreateProject: no organization to create the project in until the startup migration has run")
-	}
+	orgID, err := r.newProjectOrganization(args.OrganizationID)
 	if err != nil {
-		log.Println("Error finding the organization for a new project:", err)
 		return err
 	}
 
-	log.Printf("Creating project: %s (%s) owned by %s (%d) in organization %s", args.Name, args.Slug, args.Owner, args.OwnerID, org.ID.Hex())
-	project, err := r.models.CreateProjectWithOwner(data.Project{Name: args.Name, Slug: args.Slug, OrganizationID: org.ID}, args.OwnerID, args.Owner)
+	log.Printf("Creating project: %s (%s) owned by %s (%d) in organization %s", args.Name, args.Slug, args.Owner, args.OwnerID, orgID.Hex())
+	project, err := r.models.CreateProjectWithOwner(data.Project{Name: args.Name, Slug: args.Slug, OrganizationID: orgID}, args.OwnerID, args.Owner)
 	if err != nil {
 		log.Println("Error creating project:", err)
 		return err
 	}
 	*reply = *project
 	return nil
+}
+
+// newProjectOrganization is the organization CreateProject puts a project in:
+// the one hex names, or the Default organization when hex is empty. Whether
+// the named one exists is CreateProjectWithOwner's to check, in its transaction
+// (data.ErrUnknownOrganization).
+func (r *RPCServer) newProjectOrganization(hex string) (primitive.ObjectID, error) {
+	if hex != "" {
+		return parseOrganizationID("CreateProject", hex)
+	}
+
+	org, err := r.models.GetDefaultOrganization()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return primitive.NilObjectID, fmt.Errorf("CreateProject: no organization to create the project in until the startup migration has run")
+	}
+	if err != nil {
+		log.Println("Error finding the organization for a new project:", err)
+		return primitive.NilObjectID, err
+	}
+	return org.ID, nil
 }
 
 func (r *RPCServer) GetProject(args *data.RPCProjectIDArgs, reply *data.Project) error {

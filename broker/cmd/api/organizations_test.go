@@ -49,6 +49,7 @@ func orgMemberTarget(login string) func(string) string {
 var organizationRoutes = []projectRoute{
 	{http.MethodGet, orgPath(""), noBody, false},
 	{http.MethodPatch, orgPath(""), constBody(map[string]string{"name": "Renamed"}), true},
+	{http.MethodPost, orgPath("/projects"), constBody(map[string]string{"name": "Fresh", "slug": "fresh"}), false},
 	{http.MethodGet, orgPath("/plan"), noBody, false},
 	{http.MethodGet, orgPath("/members"), noBody, false},
 	{http.MethodPost, orgPath("/members"), constBody(map[string]any{"login": "newcomer", "user_id": testUserID("newcomer"), "role": data.RoleMember}), true},
@@ -444,6 +445,63 @@ func TestOrganizationRoutes_TakeTheOrganizationFromThePath(t *testing.T) {
 		}
 		if f.orgs[orgGlobex].Name != "Globex" {
 			t.Errorf("Globex was renamed to %q", f.orgs[orgGlobex].Name)
+		}
+	})
+}
+
+// --- Projects in an organization ---
+
+// Any member of the organization may create a project in it, which they own;
+// the organization comes from the path alone.
+func TestCreateOrganizationProject_InThePathsOrganizationOwnedByTheCaller(t *testing.T) {
+	h, f := newOrganizationTestServer(t, nil)
+
+	w := do(h, internalRequest(http.MethodPost, "/organizations/"+orgAcme+"/projects?organization_id="+orgGlobex, "org-member",
+		map[string]string{"name": "Fresh", "slug": "fresh", "organization_id": orgGlobex}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create project: got %d, want 201 (body: %s)", w.Code, w.Body.String())
+	}
+	created := decodeData[data.Project](t, w)
+	if created.OrganizationID.Hex() != orgAcme {
+		t.Errorf("created project's organization = %s, want %s", created.OrganizationID.Hex(), orgAcme)
+	}
+
+	f.snapshot(func(f *fakeLogger) {
+		if len(f.createdProjects) != 1 {
+			t.Fatalf("CreateProject called %d times, want 1", len(f.createdProjects))
+		}
+		args := f.createdProjects[0]
+		if args.OrganizationID != orgAcme {
+			t.Errorf("CreateProject organization = %q, want %q", args.OrganizationID, orgAcme)
+		}
+		if args.OwnerID != testUserID("org-member") || args.Owner != "org-member" {
+			t.Errorf("CreateProject owner = %d %q, want the caller", args.OwnerID, args.Owner)
+		}
+	})
+
+	// The new project is the caller's: they reach it as its owner.
+	w = do(h, internalRequest(http.MethodGet, "/projects/"+created.ID.Hex(), "org-member", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("GET the new project as its creator = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateOrganizationProject_RejectsInvalidInput(t *testing.T) {
+	h, f := newOrganizationTestServer(t, nil)
+
+	for name, body := range map[string]map[string]string{
+		"missing name": {"slug": "ok-slug"},
+		"invalid slug": {"name": "X", "slug": "Not A Slug"},
+		"missing slug": {"name": "X"},
+	} {
+		w := do(h, internalRequest(http.MethodPost, "/organizations/"+orgAcme+"/projects", "org-member", body))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", name, w.Code)
+		}
+	}
+	f.snapshot(func(f *fakeLogger) {
+		if len(f.createdProjects) != 0 {
+			t.Errorf("CreateProject called %d times for invalid input, want 0", len(f.createdProjects))
 		}
 	})
 }

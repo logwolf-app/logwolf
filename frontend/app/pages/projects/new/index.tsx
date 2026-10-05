@@ -10,11 +10,12 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from '~/components/ui
 import { Input } from '~/components/ui/input';
 import { eventContext } from '~/context';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
+import { useOrganizations } from '~/hooks/use-organizations';
 import { useProjects } from '~/hooks/use-projects';
 import { createApi } from '~/lib/api';
 import { requireAuth } from '~/lib/auth.server';
 import { validateCsrfToken } from '~/lib/csrf.server';
-import { commitSession, getSession } from '~/lib/session.server';
+import { commitSession, getCurrentOrganizationID, getSession } from '~/lib/session.server';
 import { slugify } from '~/lib/slug';
 
 import type { Route } from './+types';
@@ -42,8 +43,15 @@ export async function action({ request, context }: Route.ActionArgs) {
 	if (!slug) return { error: 'Name must contain at least one letter or number.' };
 
 	try {
+		// The project goes into the organization the user is working in, taken
+		// from the session like the project is everywhere else; the broker checks
+		// they are a member of it. A user in no organization creates it where
+		// projects went before organizations, the deployment's Default one.
+		const organizationId = await getCurrentOrganizationID(request);
+		event?.set('organizationId', organizationId ?? null);
+
 		const api = createApi(user);
-		const project = await api.createProject(name, slug);
+		const project = await api.createProject(name, slug, organizationId);
 		event?.set('actionData', project);
 
 		// A project you just created is the one you want to be looking at.
@@ -62,6 +70,7 @@ export default function NewProject() {
 	const fetcher = useFetcher<Route.ComponentProps['actionData']>();
 	const csrfToken = useCsrfToken();
 	const { projects } = useProjects();
+	const { currentOrganization } = useOrganizations();
 
 	const [name, setName] = useState('');
 	const slug = slugify(name);
@@ -116,7 +125,15 @@ export default function NewProject() {
 						</Field>
 					</FieldGroup>
 
-					<div className='flex justify-end border-t bg-muted/40 px-5 py-3'>
+					<div className='flex items-center justify-between gap-4 border-t bg-muted/40 px-5 py-3'>
+						<p className='text-xs text-muted-foreground'>
+							{currentOrganization && (
+								<>
+									In <span className='font-medium text-foreground'>{currentOrganization.name}</span>
+								</>
+							)}
+						</p>
+
 						<Button type='submit' size='sm' disabled={!slug || fetcher.state !== 'idle'}>
 							<Plus />
 							Create project

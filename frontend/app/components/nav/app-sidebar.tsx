@@ -1,7 +1,7 @@
-import { KeyRound, LayoutDashboard, ScrollText, Settings } from 'lucide-react';
+import { Building2, KeyRound, LayoutDashboard, ScrollText, Settings } from 'lucide-react';
 import { Link } from 'react-router';
 
-import type { Project } from '~/lib/api';
+import type { Project, UserOrganization } from '~/lib/api';
 
 import type { Route } from '../../+types/root';
 import {
@@ -18,6 +18,7 @@ import {
 	SidebarRail,
 } from '../ui/sidebar';
 import { LogoMark } from './logo';
+import { OrganizationSwitcher } from './organization-switcher';
 import { ProjectSwitcher } from './project-switcher';
 
 const items = [
@@ -45,10 +46,20 @@ export type SidebarUser = { login: string; name: string | null; avatarUrl: strin
 type Props = Pick<Route.ComponentProps, 'matches'> & {
 	projects: Project[];
 	currentProject: Project | undefined;
+	organizations: UserOrganization[];
+	currentOrganization: UserOrganization | undefined;
 	csrfToken: string;
 	user: SidebarUser;
 };
-export function AppSidebar({ matches, projects, currentProject, csrfToken, user }: Props) {
+export function AppSidebar({
+	matches,
+	projects,
+	currentProject,
+	organizations,
+	currentOrganization,
+	csrfToken,
+	user,
+}: Props) {
 	// Settings live under the project they configure. /settings still forwards
 	// there, but linking straight at the project keeps the item highlighted once
 	// the page is open.
@@ -72,7 +83,20 @@ export function AppSidebar({ matches, projects, currentProject, csrfToken, user 
 					<span className='group-data-[collapsible=icon]:hidden'>Logwolf</span>
 				</Link>
 
-				<ProjectSwitcher projects={projects} currentProject={currentProject} csrfToken={csrfToken} />
+				<div className='flex flex-col gap-1'>
+					<OrganizationSwitcher
+						organizations={organizations}
+						currentOrganization={currentOrganization}
+						csrfToken={csrfToken}
+					/>
+					<ProjectSwitcher
+						projects={projects}
+						currentProject={currentProject}
+						organizations={organizations}
+						currentOrganization={currentOrganization}
+						csrfToken={csrfToken}
+					/>
+				</div>
 			</SidebarHeader>
 
 			<SidebarContent>
@@ -99,6 +123,30 @@ export function AppSidebar({ matches, projects, currentProject, csrfToken, user 
 						</SidebarMenu>
 					</SidebarGroupContent>
 				</SidebarGroup>
+
+				{currentOrganization && (
+					<SidebarGroup>
+						<SidebarGroupLabel>Organization</SidebarGroupLabel>
+
+						<SidebarGroupContent>
+							<SidebarMenu>
+								<SidebarMenuItem>
+									<SidebarMenuButton
+										asChild
+										tooltip='Organization settings'
+										isActive={matches.some((m) => m?.pathname.startsWith('/organizations/'))}
+										className='text-sidebar-foreground/75 data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:hover:bg-primary/15 data-[active=true]:hover:text-primary'
+									>
+										<Link to={`/organizations/${currentOrganization.id}/settings`}>
+											<Building2 />
+											<span>Settings</span>
+										</Link>
+									</SidebarMenuButton>
+								</SidebarMenuItem>
+							</SidebarMenu>
+						</SidebarGroupContent>
+					</SidebarGroup>
+				)}
 			</SidebarContent>
 
 			<SidebarFooter className='border-t'>

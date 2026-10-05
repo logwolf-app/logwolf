@@ -1,7 +1,8 @@
 import { Check, ChevronsUpDown, LayoutList, Plus } from 'lucide-react';
 import { Link, useLocation, useSubmit } from 'react-router';
 
-import type { Project } from '~/lib/api';
+import type { Project, UserOrganization } from '~/lib/api';
+import { projectGroups } from '~/lib/organizations';
 import { cn } from '~/lib/utils';
 
 import {
@@ -32,9 +33,11 @@ export function ProjectAvatar({ name, className }: { name: string; className?: s
 type Props = {
 	projects: Project[];
 	currentProject: Project | undefined;
+	organizations: UserOrganization[];
+	currentOrganization: UserOrganization | undefined;
 	csrfToken: string;
 };
-export function ProjectSwitcher({ projects, currentProject, csrfToken }: Props) {
+export function ProjectSwitcher({ projects, currentProject, organizations, currentOrganization, csrfToken }: Props) {
 	const { isMobile } = useSidebar();
 	const submit = useSubmit();
 	const location = useLocation();
@@ -50,7 +53,11 @@ export function ProjectSwitcher({ projects, currentProject, csrfToken }: Props) 
 		);
 	}
 
-	if (projects.length === 0) {
+	// The current organization's projects, and those shared with the user from
+	// organizations they are not in; the rest wait for an organization switch.
+	const { own, shared } = projectGroups(projects, organizations, currentOrganization);
+
+	if (own.length === 0 && shared.length === 0) {
 		return (
 			<SidebarMenu>
 				<SidebarMenuItem>
@@ -64,6 +71,14 @@ export function ProjectSwitcher({ projects, currentProject, csrfToken }: Props) 
 			</SidebarMenu>
 		);
 	}
+
+	const item = (project: Project) => (
+		<DropdownMenuItem key={project.id} onSelect={() => switchTo(project.id)}>
+			<ProjectAvatar name={project.name} className='size-6 text-[11px]' />
+			<span className='truncate'>{project.name}</span>
+			{project.id === currentProject?.id && <Check className='ml-auto' />}
+		</DropdownMenuItem>
+	);
 
 	return (
 		<SidebarMenu>
@@ -93,15 +108,15 @@ export function ProjectSwitcher({ projects, currentProject, csrfToken }: Props) 
 						align='start'
 						side={isMobile ? 'bottom' : 'right'}
 					>
-						<DropdownMenuLabel className='text-xs text-muted-foreground'>Projects</DropdownMenuLabel>
+						{own.length > 0 && (
+							<DropdownMenuLabel className='text-xs text-muted-foreground'>Projects</DropdownMenuLabel>
+						)}
+						{own.map(item)}
 
-						{projects.map((project) => (
-							<DropdownMenuItem key={project.id} onSelect={() => switchTo(project.id)}>
-								<ProjectAvatar name={project.name} className='size-6 text-[11px]' />
-								<span className='truncate'>{project.name}</span>
-								{project.id === currentProject?.id && <Check className='ml-auto' />}
-							</DropdownMenuItem>
-						))}
+						{shared.length > 0 && (
+							<DropdownMenuLabel className='text-xs text-muted-foreground'>Shared with you</DropdownMenuLabel>
+						)}
+						{shared.map(item)}
 
 						<DropdownMenuSeparator />
 

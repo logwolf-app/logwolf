@@ -20,34 +20,33 @@ export async function action({ request, context }: Route.ActionArgs) {
 
 	await validateCsrfToken(request, fd);
 
-	const projectId = fd.get('projectId')?.toString() ?? '';
+	const organizationId = fd.get('organizationId')?.toString() ?? '';
 	const redirectTo = safeRedirect(fd.get('redirectTo')?.toString(), FALLBACK_REDIRECT);
-	event?.set('projectId', projectId);
+	event?.set('organizationId', organizationId);
 
-	// The id comes from the browser, so membership is re-checked here. A project
-	// the user can no longer reach — deleted, or one they were removed from —
-	// leaves the session alone; the layout loader re-points it on the way back.
+	// The id comes from the browser, so membership is re-checked here, as the
+	// project switcher does; an organization the user is not in leaves the
+	// session alone.
 	const api = createApi(user);
-	const projects = await api.getProjects();
-	const project = projects.find((p) => p.id === projectId);
+	const [organizations, projects] = await Promise.all([api.getOrganizations(), api.getProjects()]);
 
-	if (!project) {
+	if (!organizations.some((o) => o.id === organizationId)) {
 		event?.setSeverity('warning');
 		event?.set('switchRejected', 'not a member');
 		return redirect(redirectTo);
 	}
 
 	const session = await getSession(request.headers.get('Cookie'));
-	session.set('currentProjectID', projectId);
+	session.set('currentOrganizationID', organizationId);
 
-	// Opening a project of another of the user's organizations (the projects
-	// page lists them all) moves them into that organization. A project shared
-	// from one they are not in leaves the organization as it is.
-	if (project.organization_id && project.organization_id !== session.get('currentOrganizationID')) {
-		const organizations = await api.getOrganizations();
-		if (organizations.some((o) => o.id === project.organization_id)) {
-			session.set('currentOrganizationID', project.organization_id);
-		}
+	// Switching organization means working in one of its projects. With none
+	// the project is cleared, and the layout takes over: a project shared with
+	// the user, or /projects/new to create the organization's first.
+	const current = projects.find((p) => p.id === session.get('currentProjectID'));
+	if (current?.organization_id !== organizationId) {
+		const first = projects.find((p) => p.organization_id === organizationId);
+		if (first) session.set('currentProjectID', first.id);
+		else session.unset('currentProjectID');
 	}
 
 	return redirect(redirectTo, { headers: { 'Set-Cookie': await commitSession(session) } });

@@ -12,17 +12,24 @@ import { Field, FieldGroup, FieldLabel } from '~/components/ui/field';
 import { Input } from '~/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '~/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '~/components/ui/table';
-import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
-import type { ProjectMember } from '~/lib/api';
+import type { OrganizationMember, OrganizationRole } from '~/lib/api';
+import { assignableOrganizationRoles, canManageOrganization } from '~/lib/organizations';
 
-type Props = { members: ProjectMember[]; currentUser: { id: number; login: string }; canManage: boolean };
+type Props = {
+	members: OrganizationMember[];
+	currentUser: { id: number; login: string };
+	/** The signed-in user's role in the organization. */
+	callerRole: OrganizationRole;
+};
 
-export function MembersSection({ members, currentUser, canManage }: Props) {
+export function MembersSection({ members, currentUser, callerRole }: Props) {
 	const csrfToken = useCsrfToken();
+	const canManage = canManageOrganization(callerRole);
+	const roles = assignableOrganizationRoles(callerRole);
 
-	// Adding, changing roles and removing get their own fetchers so a pending
-	// removal doesn't grey out the add form, and each reports its own error.
+	// As on the project page: one fetcher per kind of change, so each reports
+	// its own error and a pending removal doesn't grey out the add form.
 	const addFetcher = useFetcher<SettingsActionResult>();
 	const roleFetcher = useFetcher<SettingsActionResult>();
 	const removeFetcher = useFetcher<SettingsActionResult>();
@@ -33,24 +40,21 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 
 	const addFormRef = useRef<HTMLFormElement>(null);
 
-	// The fetcher revalidates the table on its own, but the login it just added
-	// would otherwise stay in the box waiting to be added a second time.
 	useEffect(() => {
 		if (addFetcher.data?.success) addFormRef.current?.reset();
 	}, [addFetcher.data]);
 
-	// A project must always keep one owner, so the last one can be neither
-	// removed nor demoted. The broker refuses both too; this only saves the
-	// round trip.
+	// An organization always keeps one owner, and only owners change owners.
+	// The broker refuses both; leaving the controls out only saves the round trip.
 	const ownerCount = members.filter((m) => m.role === 'owner').length;
-	const removing = removeFetcher.formData?.get('member')?.toString();
+	const canChange = (member: OrganizationMember) =>
+		canManage && !(member.role === 'owner' && ownerCount === 1) && (member.role !== 'owner' || callerRole === 'owner');
 
-	// While a role change is in flight, show the role it asked for rather than
-	// snapping back to the old one until the table revalidates.
+	const removing = removeFetcher.formData?.get('member')?.toString();
 	const changingRole = roleFetcher.formData?.get('member')?.toString();
 	const pendingRole = roleFetcher.formData?.get('role')?.toString();
 
-	function changeRole(member: ProjectMember, role: string) {
+	function changeRole(member: OrganizationMember, role: string) {
 		roleFetcher.submit(
 			{ _csrf: csrfToken, intent: 'change-role', member: member.id, login: member.github_login, role },
 			{ method: 'post' },
@@ -58,13 +62,12 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 	}
 
 	const error = addFetcher.data?.error ?? roleFetcher.data?.error ?? removeFetcher.data?.error;
-	// Set when a member was added whom the allowlist does not clear.
 	const warning = addFetcher.data?.warning;
 
 	return (
 		<SettingsRow
 			title='Members'
-			description='Everyone here can see the project and its events. Owners can also rename it, manage members and delete it.'
+			description='Owners own every project in the organization. Owners and admins rename it and manage its members; only owners add, remove or change owners.'
 		>
 			<div className='flex flex-col gap-3'>
 				{error && (
@@ -94,6 +97,7 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 
 						<TableBody>
 							{members.map((member) => {
+								const editable = canChange(member);
 								const isLastOwner = member.role === 'owner' && ownerCount === 1;
 
 								return (
@@ -107,13 +111,12 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 													{member.github_login.slice(0, 2)}
 												</span>
 												<span className='font-medium'>{member.github_login}</span>
-												{isCurrentUser(member, currentUser) && <Badge variant='outline'>you</Badge>}
-												{!member.user_id && <NotYetLinked login={member.github_login} />}
+												{member.user_id === currentUser.id && <Badge variant='outline'>you</Badge>}
 											</div>
 										</TableCell>
 
 										<TableCell>
-											{canManage && !isLastOwner ? (
+											{editable ? (
 												<Select
 													value={changingRole === member.id ? pendingRole : member.role}
 													onValueChange={(role) => changeRole(member, role)}
@@ -124,12 +127,15 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 													</SelectTrigger>
 
 													<SelectContent>
-														<SelectItem value='member'>member</SelectItem>
-														<SelectItem value='owner'>owner</SelectItem>
+														{roles.map((role) => (
+															<SelectItem key={role} value={role}>
+																{role}
+															</SelectItem>
+														))}
 													</SelectContent>
 												</Select>
 											) : (
-												<Badge variant={member.role === 'owner' ? 'default' : 'secondary'}>{member.role}</Badge>
+												<Badge variant={member.role === 'member' ? 'secondary' : 'default'}>{member.role}</Badge>
 											)}
 										</TableCell>
 
@@ -140,24 +146,26 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 										{canManage && (
 											<TableCell>
 												{isLastOwner ? (
-													<span className='text-xs text-muted-foreground whitespace-nowrap'>Last owner</span>
+													<span className='text-xs whitespace-nowrap text-muted-foreground'>Last owner</span>
 												) : (
-													<removeFetcher.Form method='post'>
-														<input type='hidden' name='_csrf' value={csrfToken} />
-														<input type='hidden' name='intent' value='remove-member' />
-														<input type='hidden' name='member' value={member.id} />
-														<input type='hidden' name='login' value={member.github_login} />
+													editable && (
+														<removeFetcher.Form method='post'>
+															<input type='hidden' name='_csrf' value={csrfToken} />
+															<input type='hidden' name='intent' value='remove-member' />
+															<input type='hidden' name='member' value={member.id} />
+															<input type='hidden' name='login' value={member.github_login} />
 
-														<Button
-															type='submit'
-															variant='ghost'
-															size='icon-sm'
-															aria-label={`Remove ${member.github_login}`}
-															disabled={removing === member.id}
-														>
-															<Trash2 />
-														</Button>
-													</removeFetcher.Form>
+															<Button
+																type='submit'
+																variant='ghost'
+																size='icon-sm'
+																aria-label={`Remove ${member.github_login}`}
+																disabled={removing === member.id}
+															>
+																<Trash2 />
+															</Button>
+														</removeFetcher.Form>
+													)
 												)}
 											</TableCell>
 										)}
@@ -191,8 +199,11 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 												</SelectTrigger>
 
 												<SelectContent>
-													<SelectItem value='member'>member</SelectItem>
-													<SelectItem value='owner'>owner</SelectItem>
+													{roles.map((role) => (
+														<SelectItem key={role} value={role}>
+															{role}
+														</SelectItem>
+													))}
 												</SelectContent>
 											</Select>
 										</Field>
@@ -210,35 +221,4 @@ export function MembersSection({ members, currentUser, canManage }: Props) {
 			</div>
 		</SettingsRow>
 	);
-}
-
-/**
- * Marks a membership stored before members were tied to GitHub accounts. It
- * carries a login alone, and is linked to whoever signs in under that login
- * next; until then the login is all that decides who has it.
- */
-function NotYetLinked({ login }: { login: string }) {
-	return (
-		<Tooltip>
-			<TooltipTrigger asChild>
-				<Badge variant='outline' tabIndex={0} className='border-dashed'>
-					not yet linked
-				</Badge>
-			</TooltipTrigger>
-
-			<TooltipContent className='max-w-64'>
-				Added before members were tied to GitHub accounts. It links to {login}&rsquo;s account the next time they sign
-				in; until then, whoever holds the login {login} on GitHub gets this access.
-			</TooltipContent>
-		</Tooltip>
-	);
-}
-
-/**
- * Whether the membership is the signed-in user's: by user ID, or, for one
- * stored before user IDs, by login, the way the broker matches it.
- */
-function isCurrentUser(member: ProjectMember, user: { id: number; login: string }) {
-	if (member.user_id) return member.user_id === user.id;
-	return member.github_login === user.login.toLowerCase();
 }

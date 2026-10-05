@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Api } from './api';
 
 const project = 'aaaaaaaaaaaaaaaaaaaaaaa1';
+const organization = 'ddddddddddddddddddddddd4';
 
 describe('Api', () => {
 	let fetchMock: ReturnType<typeof vi.fn>;
@@ -80,6 +81,57 @@ describe('Api', () => {
 			undefined,
 		],
 		['deleteProject', () => api.deleteProject(project), 'DELETE', `projects/${project}`, undefined],
+		['createProject', () => api.createProject('App', 'app'), 'POST', 'projects', { name: 'App', slug: 'app' }],
+		[
+			'createProject in an organization',
+			() => api.createProject('App', 'app', organization),
+			'POST',
+			`organizations/${organization}/projects`,
+			{ name: 'App', slug: 'app' },
+		],
+		['getOrganizations', () => api.getOrganizations(), 'GET', 'organizations', undefined],
+		[
+			'updateOrganization',
+			() => api.updateOrganization(organization, 'Acme'),
+			'PATCH',
+			`organizations/${organization}`,
+			{ name: 'Acme' },
+		],
+		[
+			'getOrganizationPlan',
+			() => api.getOrganizationPlan(organization),
+			'GET',
+			`organizations/${organization}/plan`,
+			undefined,
+		],
+		[
+			'getOrganizationMembers',
+			() => api.getOrganizationMembers(organization),
+			'GET',
+			`organizations/${organization}/members`,
+			undefined,
+		],
+		[
+			'addOrganizationMember',
+			() => api.addOrganizationMember(organization, { id: 9001, login: 'octodog' }, 'admin'),
+			'POST',
+			`organizations/${organization}/members`,
+			{ login: 'octodog', user_id: 9001, role: 'admin' },
+		],
+		[
+			'updateOrganizationMemberRole',
+			() => api.updateOrganizationMemberRole(organization, member, 'owner'),
+			'PATCH',
+			`organizations/${organization}/members/${member}`,
+			{ role: 'owner' },
+		],
+		[
+			'removeOrganizationMember',
+			() => api.removeOrganizationMember(organization, member),
+			'DELETE',
+			`organizations/${organization}/members/${member}`,
+			undefined,
+		],
 		[
 			'upsertCurrentUser',
 			() => api.upsertCurrentUser('octo@example.com'),
@@ -115,6 +167,11 @@ describe('Api', () => {
 		answer(null);
 		await api.deleteKey(project, 'k1/../../x');
 		expect(call().url).toBe(`http://broker/projects/${project}/keys/k1%2F..%2F..%2Fx`);
+
+		fetchMock.mockClear();
+		answer(null);
+		await api.removeOrganizationMember(organization, '../../plan');
+		expect(call().url).toBe(`http://broker/organizations/${organization}/members/..%2F..%2Fplan`);
 	});
 
 	it('throws the broker’s message when it answers an error', async () => {

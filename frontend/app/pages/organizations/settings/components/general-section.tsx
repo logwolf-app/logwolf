@@ -6,20 +6,20 @@ import { SettingsFooter, SettingsRow } from '~/components/settings/settings-row'
 import { Alert, AlertTitle } from '~/components/ui/alert';
 import { Button } from '~/components/ui/button';
 import { Card } from '~/components/ui/card';
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '~/components/ui/field';
+import { Field, FieldGroup, FieldLabel } from '~/components/ui/field';
 import { Input } from '~/components/ui/input';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
-import type { UserProject } from '~/lib/api';
+import type { UserOrganization } from '~/lib/api';
 
-type Props = { project: UserProject; canEdit: boolean };
+type Props = { organization: UserOrganization; canEdit: boolean };
 
-export function GeneralSection({ project, canEdit }: Props) {
+export function GeneralSection({ organization, canEdit }: Props) {
 	const csrfToken = useCsrfToken();
 	const fetcher = useFetcher<SettingsActionResult>();
 	useSuccessToast(fetcher.data);
 
 	return (
-		<SettingsRow title='General' description='How this project is named across the dashboard.'>
+		<SettingsRow title='General' description='How this organization is named across the dashboard.'>
 			<Card className='gap-0 overflow-hidden py-0'>
 				<fetcher.Form method='post'>
 					<FieldGroup className='p-5'>
@@ -35,27 +35,22 @@ export function GeneralSection({ project, canEdit }: Props) {
 						<Field>
 							<FieldLabel htmlFor='name'>Name</FieldLabel>
 
-							{/* Keyed on the project so opening another project's settings
+							{/* Keyed on the organization so opening another one's settings
 							    doesn't leave the previous name in an uncontrolled input. */}
 							<Input
-								key={project.id}
+								key={organization.id}
 								id='name'
 								name='name'
 								type='text'
-								defaultValue={project.name}
+								defaultValue={organization.name}
 								disabled={!canEdit}
 								required
 								className='max-w-sm'
 							/>
-
-							<FieldDescription>
-								Slug: <code className='font-mono text-foreground'>{project.slug}</code> — set when the project was
-								created and fixed after that.
-							</FieldDescription>
 						</Field>
 					</FieldGroup>
 
-					<SettingsFooter hint={canEdit ? undefined : 'Only an owner can rename this project.'}>
+					<SettingsFooter hint={canEdit ? undefined : 'Only an owner or an admin can rename this organization.'}>
 						{canEdit && (
 							<Button type='submit' size='sm' disabled={fetcher.state !== 'idle'}>
 								<Check />

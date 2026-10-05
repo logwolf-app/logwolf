@@ -29,7 +29,7 @@ func classifyRPCError(err error) rpcErrorKind {
 		return rpcErrDuplicate
 	// A malformed id is not found either: no document can have it.
 	case strings.Contains(msg, "no documents in result"), strings.Contains(msg, "not a valid ObjectID"),
-		strings.Contains(msg, data.ErrKeyNotFound.Error()):
+		strings.Contains(msg, data.ErrKeyNotFound.Error()), strings.Contains(msg, data.ErrUnknownOrganization.Error()):
 		return rpcErrNotFound
 	case strings.Contains(msg, data.ErrLastOwner.Error()), strings.Contains(msg, data.ErrLastOrganizationOwner.Error()):
 		return rpcErrLastOwner

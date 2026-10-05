@@ -448,22 +448,12 @@ func (app *Config) ListProjects(w http.ResponseWriter, r *http.Request) {
 	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Message: "OK!", Data: projects})
 }
 
+// CreateProject creates a project in the deployment's Default organization,
+// owned by the caller. CreateOrganizationProject creates one in an
+// organization the caller is a member of.
 func (app *Config) CreateProject(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name string `json:"name"`
-		Slug string `json:"slug"`
-	}
-	if err := app.readJSON(w, r, &body); err != nil {
-		app.errorJSON(w, err)
-		return
-	}
-
-	if body.Name == "" {
-		app.errorJSON(w, fmt.Errorf("name is required"), http.StatusBadRequest)
-		return
-	}
-	if !data.ValidSlug(body.Slug) {
-		app.errorJSON(w, fmt.Errorf("invalid slug"), http.StatusBadRequest)
+	args, ok := app.readNewProject(w, r)
+	if !ok {
 		return
 	}
 
@@ -473,13 +463,42 @@ func (app *Config) CreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	defer client.Close()
 
-	// One call: the logger writes the project and the caller's owner membership
-	// in one transaction, so a failure leaves no project nobody can reach.
-	// Slugs are not unique, so there is no collision to report.
+	app.createProject(w, client, args)
+}
+
+// readNewProject reads and checks the body of a project creation, and answers
+// the request itself when it is wrong. The arguments it returns name the
+// caller as the owner, and no organization.
+func (app *Config) readNewProject(w http.ResponseWriter, r *http.Request) (data.RPCCreateProjectArgs, bool) {
+	var body struct {
+		Name string `json:"name"`
+		Slug string `json:"slug"`
+	}
+	if err := app.readJSON(w, r, &body); err != nil {
+		app.errorJSON(w, err)
+		return data.RPCCreateProjectArgs{}, false
+	}
+
+	if body.Name == "" {
+		app.errorJSON(w, fmt.Errorf("name is required"), http.StatusBadRequest)
+		return data.RPCCreateProjectArgs{}, false
+	}
+	if !data.ValidSlug(body.Slug) {
+		app.errorJSON(w, fmt.Errorf("invalid slug"), http.StatusBadRequest)
+		return data.RPCCreateProjectArgs{}, false
+	}
+
+	return data.RPCCreateProjectArgs{Name: body.Name, Slug: body.Slug, OwnerID: userIDFromContext(r), Owner: userLoginFromContext(r)}, true
+}
+
+// createProject asks the logger for the project and answers with it. One call:
+// the logger writes the project and the caller's owner membership in one
+// transaction, so a failure leaves no project nobody can reach. Slugs are not
+// unique, so there is no collision to report.
+func (app *Config) createProject(w http.ResponseWriter, client *rpc.Client, args data.RPCCreateProjectArgs) {
 	var project data.Project
-	args := data.RPCCreateProjectArgs{Name: body.Name, Slug: body.Slug, OwnerID: userIDFromContext(r), Owner: userLoginFromContext(r)}
 	if err := client.Call("RPCServer.CreateProject", &args, &project); err != nil {
-		app.rpcErrorJSON(w, err, nil)
+		app.rpcErrorJSON(w, err, organizationNotFound)
 		return
 	}
 

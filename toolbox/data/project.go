@@ -42,11 +42,17 @@ var slugRe = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 // of different users may share one, so creating a project never tells anyone
 // that another user's project exists. The Default project that holds
 // pre-multi-tenancy data is found by its Default flag instead.
+//
+// OrganizationID is the organization the project belongs to. Every project is
+// created inside one (CreateProjectWithOwner); those stored before
+// organizations existed are moved into the Default organization by the startup
+// migration (EnsureDefaultOrganization), and have none until then.
 type Project struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Name      string             `bson:"name" json:"name"`
-	Slug      string             `bson:"slug" json:"slug"`
-	CreatedAt time.Time          `bson:"created_at" json:"created_at"`
+	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
+	Name           string             `bson:"name" json:"name"`
+	Slug           string             `bson:"slug" json:"slug"`
+	OrganizationID primitive.ObjectID `bson:"organization_id,omitempty" json:"organization_id,omitempty"`
+	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
 	// Default marks the project the startup migration adopts project-less data
 	// into. At most one project has it; see EnsureProjectIndexes.
 	Default bool `bson:"default,omitempty" json:"-"`
@@ -205,6 +211,15 @@ func (m *Models) EnsureProjectIndexes() error {
 			SetPartialFilterExpression(bson.M{"default": true}),
 	}); err != nil {
 		return fmt.Errorf("EnsureProjectIndexes projects.default: %w", err)
+	}
+
+	// An organization's projects are looked up by it, as are the projects the
+	// startup migration has yet to put in one.
+	if _, err := projects.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "organization_id", Value: 1}},
+		Options: options.Index().SetName("project_organization_id"),
+	}); err != nil {
+		return fmt.Errorf("EnsureProjectIndexes projects.organization_id: %w", err)
 	}
 
 	members := m.client.Database("logs").Collection("project_members")
@@ -391,6 +406,9 @@ func (m *Models) InsertProject(p Project) (*Project, error) {
 // with this GitHub user ID and login in one transaction. Only an owner can add
 // members, so a project that exists without one is unreachable for good; here
 // either both documents are written or neither is.
+//
+// The project is created inside the organization p.OrganizationID, which must
+// exist: ErrUnknownOrganization otherwise.
 func (m *Models) CreateProjectWithOwner(p Project, userID int64, login string) (*Project, error) {
 	login = NormalizeGithubLogin(login)
 	if userID <= 0 {
@@ -398,6 +416,9 @@ func (m *Models) CreateProjectWithOwner(p Project, userID int64, login string) (
 	}
 	if login == "" {
 		return nil, errors.New("CreateProjectWithOwner: owner login is required")
+	}
+	if p.OrganizationID.IsZero() {
+		return nil, errors.New("CreateProjectWithOwner: organization is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -424,6 +445,13 @@ func (m *Models) CreateProjectWithOwner(p Project, userID int64, login string) (
 	// writes the same two documents again rather than a second project.
 	db := m.client.Database("logs")
 	_, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (any, error) {
+		exists, err := m.OrganizationExists(sc, p.OrganizationID)
+		if err != nil {
+			return nil, fmt.Errorf("CreateProjectWithOwner: %w", err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("CreateProjectWithOwner: %w: %s", ErrUnknownOrganization, p.OrganizationID.Hex())
+		}
 		if _, err := db.Collection("projects").InsertOne(sc, p); err != nil {
 			return nil, fmt.Errorf("CreateProjectWithOwner project: %w", err)
 		}

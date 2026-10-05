@@ -12,7 +12,7 @@ The only Logwolf service with direct MongoDB access. All reads, writes, and dele
 ```
 cmd/api/
 ├── main.go     # MongoDB setup, indexes, startup migration, dual-server startup, graceful shutdown
-├── migrate.go  # Startup migration of pre-multi-tenancy data into the Default project
+├── migrate.go  # Startup migration: pre-multi-tenancy data into the Default project, projects into the Default organization
 ├── cleanup.go  # Background per-project retention cleanup loop, plus the sweep of deleted projects' logs
 ├── projects.go # Short-lived cache of project ids known to exist, used by LogInfo
 ├── startup.go  # Startup passes (indexes + migration), background retries, the state /health reports
@@ -55,7 +55,7 @@ Users are keyed by GitHub user ID, which survives a rename; the login is only wh
 
 Both refuse a GitHub ID that is not positive with `data.ErrInvalidUser`.
 
-`UpsertUser` is called at each sign-in, so it is also where memberships stored before user IDs, which carry only a login, are linked to the user signing in under that login (`data.LinkMemberships`). A failure in either step fails the call, and the sign-in with it; both are idempotent, so the next sign-in finishes the job.
+`UpsertUser` is called at each sign-in, so it is also where memberships stored before user IDs, which carry only a login, are linked to the user signing in under that login (`data.LinkMemberships`), and where a login the `Default` organization keeps as a pending owner (see the startup migration) becomes an owner membership of that user (`data.ClaimPendingOwnerships`). A failure in any step fails the call, and the sign-in with it; each is idempotent, so the next sign-in finishes the job.
 
 Organizations sit above projects and hold the plan. Their members are always users, by GitHub user ID, with the role `owner`, `admin` or `member`:
 
@@ -100,7 +100,7 @@ Each log entry stored in MongoDB contains:
 
 `api_keys.project_id`, `settings.project_id` and `project_members.project_id` are ObjectIDs too, as is `organization_members.organization_id`, like `organizations._id`. RPC arguments carry project ids as hex strings; each RPC method parses them (`parseProjectID`) and refuses a malformed one with a `not a valid ObjectID` error, which the broker answers with 404.
 
-`CreateProject` takes the owner's login with the project, and writes both in one transaction (`CreateProjectWithOwner`). `UpdateProject` renames only: the slug is fixed at creation.
+`CreateProject` takes the owner's login with the project, and writes both in one transaction (`CreateProjectWithOwner`), inside the deployment's `Default` organization: every project belongs to an organization (`projects.organization_id`, an ObjectID). Until the startup migration has created that organization, `CreateProject` refuses. `UpdateProject` renames only: the slug is fixed at creation.
 
 ## Retention
 
@@ -139,7 +139,11 @@ Then, on every start and whatever the orphan count, Logger checks that the `Defa
 
 The owner logins are `LOGWOLF_ALLOWED_GITHUB_USERS` plus `LOGWOLF_DEFAULT_PROJECT_OWNERS`. Logger has no GitHub token to resolve them to user IDs, so these memberships carry the login alone; each is linked to its user at their first sign-in (`UpsertUser`), and until then matched by login. Both steps match only memberships not linked yet: a login that a linked membership still stores is skipped, since that membership belongs to whoever it is linked to.
 
-The migration is idempotent — once no orphaned documents remain and `Default` has an owner it is a no-op, so it runs safely on every start. A run that fails partway does not stop the service from booting; the failure is logged as `Migration: FAILED`.
+Last, every project is put in an organization (`EnsureDefaultOrganization`). On every start, Logger finds the organization with the `default` flag (a partial unique index allows one), or creates it: name `Default`, plan `selfhosted`, no billing customer. Then it sets that organization on every project that has none, which on an upgraded deployment is all of them, and on a fresh one none: a fresh install gets its organization before it has any project, so the first project created has one to go in.
+
+The organization is owned by the `Default` project's owners. Organization memberships always name a user ID, so only the owners linked to one become owner members at once; each login-only owner is kept on the organization as a pending owner (`pending_owners`) and becomes an owner at their next sign-in. With no `Default` project, or one with no owner, the owner logins above are the pending owners. Like the project's, an organization left with neither an owner nor a pending one gets them on a later start; one with either is left alone. A deployment with nobody to make owner logs a warning: its projects work as before, but nobody can manage the organization.
+
+The migration is idempotent — once no orphaned documents remain, `Default` has an owner and every project has an organization it is a no-op, so it runs safely on every start. A run that fails partway does not stop the service from booting; the failure is logged as `Migration: FAILED`.
 
 ### Failed startup passes
 

@@ -21,12 +21,17 @@ var ErrLastOrganizationOwner = errors.New("cannot remove the last owner of an or
 // organization it cannot create: no name, or no plan.
 var ErrInvalidOrganization = errors.New("invalid organization")
 
+// ErrUnknownOrganization is what CreateProjectWithOwner answers for a project
+// whose organization does not exist.
+var ErrUnknownOrganization = errors.New("organization does not exist")
+
 // RoleAdmin is the organization role between owner and member. Projects have no
 // admins: their roles are RoleOwner and RoleMember alone (ValidRole).
 const RoleAdmin = "admin"
 
 // Organization sits above projects: it owns them, holds the plan, and so sets
-// the limits its projects work within.
+// the limits its projects work within. Every project belongs to one
+// (Project.OrganizationID).
 //
 // Plan names the plan the organization is on. BillingCustomerID is the billing
 // provider's id for the organization, empty when nothing bills it, as on every
@@ -37,6 +42,14 @@ type Organization struct {
 	Plan              string             `bson:"plan" json:"plan"`
 	BillingCustomerID string             `bson:"billing_customer_id" json:"billing_customer_id"`
 	CreatedAt         time.Time          `bson:"created_at" json:"created_at"`
+	// Default marks the deployment's organization, which the startup migration
+	// creates and puts every project in. At most one organization has it; see
+	// EnsureOrganizationIndexes.
+	Default bool `bson:"default,omitempty" json:"-"`
+	// PendingOwners are logins that become owners at their next sign-in
+	// (ClaimPendingOwnerships). A membership needs a user ID, and the Default
+	// organization's owners can include logins nobody has signed in under yet.
+	PendingOwners []string `bson:"pending_owners,omitempty" json:"-"`
 }
 
 // OrganizationMember is one user's membership of one organization.
@@ -166,13 +179,34 @@ func (m *Models) organizationMembers() *mongo.Collection {
 	return m.client.Database("logs").Collection("organization_members")
 }
 
-// EnsureOrganizationIndexes creates the indexes on organization_members: the
+// EnsureOrganizationIndexes creates the indexes on organizations and
+// organization_members: the partial unique one that allows a single Default
+// organization; pending_owners, which each sign-in looks its login up in; the
 // unique (organization_id, user_id), which keeps one membership per user per
-// organization, and user_id, which lists a user's organizations. Safe to call on
+// organization; and user_id, which lists a user's organizations. Safe to call on
 // startup — CreateOne is idempotent for identical index definitions.
 func (m *Models) EnsureOrganizationIndexes() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	// Like the Default project's: unique over the organizations that have the
+	// flag, which every other one leaves out.
+	orgs := m.organizations()
+	if _, err := orgs.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "default", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName(defaultOrganizationIndexName).
+			SetPartialFilterExpression(bson.M{"default": true}),
+	}); err != nil {
+		return fmt.Errorf("EnsureOrganizationIndexes organizations.default: %w", err)
+	}
+
+	if _, err := orgs.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "pending_owners", Value: 1}},
+		Options: options.Index().SetName("organization_pending_owners").
+			SetPartialFilterExpression(bson.M{"pending_owners": bson.M{"$exists": true}}),
+	}); err != nil {
+		return fmt.Errorf("EnsureOrganizationIndexes organizations.pending_owners: %w", err)
+	}
 
 	members := m.organizationMembers()
 	if _, err := members.Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -503,4 +537,77 @@ func (m *Models) GetOrganizationsForUser(userID int64) ([]UserOrganization, erro
 		result = append(result, UserOrganization{Organization: o, Role: roles[o.ID]})
 	}
 	return result, nil
+}
+
+// ClaimPendingOwnerships makes the user with this GitHub user ID an owner of
+// every organization that lists login, their current login, among its pending
+// owners, and takes the login off the list. Like LinkMemberships, it runs at
+// each sign-in, the one moment GitHub vouches for which account holds a login.
+// A user who is a member already is promoted: they were named an owner. Returns
+// how many organizations the user became an owner of.
+//
+// Each organization is claimed in its own transaction, serialized like any
+// other change to its members, so a failure leaves the login pending there for
+// the next sign-in. It does nothing for a login no organization is waiting for.
+func (m *Models) ClaimPendingOwnerships(githubID int64, login string) (int64, error) {
+	login = NormalizeGithubLogin(login)
+	if githubID <= 0 {
+		return 0, fmt.Errorf("ClaimPendingOwnerships: %w: GitHub user ID must be positive, got %d", ErrInvalidUser, githubID)
+	}
+	if login == "" {
+		return 0, fmt.Errorf("ClaimPendingOwnerships: %w: login is required", ErrInvalidUser)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cursor, err := m.organizations().Find(ctx, bson.M{"pending_owners": login}, options.Find().SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		return 0, fmt.Errorf("ClaimPendingOwnerships: %w", err)
+	}
+	var orgs []Organization
+	if err := cursor.All(ctx, &orgs); err != nil {
+		return 0, fmt.Errorf("ClaimPendingOwnerships decode: %w", err)
+	}
+
+	var claimed int64
+	for _, o := range orgs {
+		var owner bool
+		err := m.changeOrganizationMembers("ClaimPendingOwnerships", o.ID, func(sc mongo.SessionContext, coll *mongo.Collection) error {
+			owner = false
+
+			// Taking the login off the list first, and matching it, means a sign-in
+			// running alongside this one that claimed it already changes nothing.
+			result, err := m.organizations().UpdateOne(sc,
+				bson.M{"_id": o.ID, "pending_owners": login},
+				bson.M{"$pull": bson.M{"pending_owners": login}},
+			)
+			if err != nil {
+				return fmt.Errorf("ClaimPendingOwnerships %s: %w", o.ID.Hex(), err)
+			}
+			if result.ModifiedCount == 0 {
+				return nil
+			}
+
+			if _, err := coll.UpdateOne(sc,
+				bson.M{"organization_id": o.ID, "user_id": githubID},
+				bson.M{
+					"$set":         bson.M{"role": RoleOwner},
+					"$setOnInsert": bson.M{"github_login": login, "created_at": time.Now()},
+				},
+				options.Update().SetUpsert(true),
+			); err != nil {
+				return fmt.Errorf("ClaimPendingOwnerships %s owner: %w", o.ID.Hex(), err)
+			}
+			owner = true
+			return nil
+		})
+		if err != nil {
+			return claimed, err
+		}
+		if owner {
+			claimed++
+		}
+	}
+	return claimed, nil
 }

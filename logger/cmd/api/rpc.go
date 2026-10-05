@@ -201,8 +201,8 @@ func (r *RPCServer) GetMetrics(args *data.ProjectArgs, reply *data.Metrics) erro
 }
 
 // CreateProject creates a project owned by the user args.OwnerID, whose login is
-// args.Owner. The project and the owner membership are written in one
-// transaction, so a failure leaves neither.
+// args.Owner, inside the deployment's Default organization. The project and the
+// owner membership are written in one transaction, so a failure leaves neither.
 func (r *RPCServer) CreateProject(args *data.RPCCreateProjectArgs, reply *data.Project) error {
 	if args.Name == "" {
 		return fmt.Errorf("CreateProject: name is required")
@@ -213,8 +213,18 @@ func (r *RPCServer) CreateProject(args *data.RPCCreateProjectArgs, reply *data.P
 	if args.OwnerID <= 0 || data.NormalizeGithubLogin(args.Owner) == "" {
 		return fmt.Errorf("CreateProject: owner is required")
 	}
-	log.Printf("Creating project: %s (%s) owned by %s (%d)", args.Name, args.Slug, args.Owner, args.OwnerID)
-	project, err := r.models.CreateProjectWithOwner(data.Project{Name: args.Name, Slug: args.Slug}, args.OwnerID, args.Owner)
+
+	org, err := r.models.GetDefaultOrganization()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return fmt.Errorf("CreateProject: no organization to create the project in until the startup migration has run")
+	}
+	if err != nil {
+		log.Println("Error finding the organization for a new project:", err)
+		return err
+	}
+
+	log.Printf("Creating project: %s (%s) owned by %s (%d) in organization %s", args.Name, args.Slug, args.Owner, args.OwnerID, org.ID.Hex())
+	project, err := r.models.CreateProjectWithOwner(data.Project{Name: args.Name, Slug: args.Slug, OrganizationID: org.ID}, args.OwnerID, args.Owner)
 	if err != nil {
 		log.Println("Error creating project:", err)
 		return err
@@ -604,9 +614,11 @@ func (r *RPCServer) UpdateOrganizationMemberRole(args *data.RPCUpdateOrganizatio
 
 // UpsertUser records a sign-in: it creates the user with this GitHub ID, or
 // refreshes the login and email of the existing one, links the memberships
-// stored before user IDs under their login to them (data.LinkMemberships), and
-// replies with the user as stored. A failure in either step fails the sign-in;
-// both are idempotent, so the next one finishes the job.
+// stored before user IDs under their login to them (data.LinkMemberships),
+// makes them owner of the organizations waiting for their login
+// (data.ClaimPendingOwnerships), and replies with the user as stored. A failure
+// in any step fails the sign-in; each is idempotent, so the next one finishes
+// the job.
 func (r *RPCServer) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) error {
 	log.Printf("Upserting user %d (%s)", args.GithubID, args.GithubLogin)
 	user, err := r.models.UpsertUser(args.GithubID, args.GithubLogin, args.Email)
@@ -623,6 +635,16 @@ func (r *RPCServer) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) e
 	if links.Linked > 0 || links.Merged > 0 {
 		log.Printf("Linked memberships of %s to user %d: linked=%d merged=%d",
 			user.GithubLogin, user.GithubID, links.Linked, links.Merged)
+	}
+
+	claimed, err := r.models.ClaimPendingOwnerships(user.GithubID, user.GithubLogin)
+	if err != nil {
+		log.Println("Error claiming pending organization ownerships:", err)
+		return err
+	}
+	if claimed > 0 {
+		log.Printf("User %d (%s) became owner of organizations=%d they were pending owner of",
+			user.GithubID, user.GithubLogin, claimed)
 	}
 
 	*reply = *user

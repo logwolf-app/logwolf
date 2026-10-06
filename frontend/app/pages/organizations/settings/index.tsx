@@ -13,6 +13,7 @@ import type { Route } from './+types';
 import { GeneralSection } from './components/general-section';
 import { MembersSection } from './components/members-section';
 import { PlanSection } from './components/plan-section';
+import { UsageSection } from './components/usage-section';
 
 export function meta({ data }: Route.MetaArgs) {
 	return [{ title: `${data?.organization.name ?? 'Organization'} settings - Logwolf` }];
@@ -47,13 +48,16 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 
 	const { user, api, organization } = await requireOrganization(request, params.id);
 
-	const [members, plan] = await Promise.all([
+	// Usage by project names every project in the organization, so the broker
+	// answers it to owners and admins alone; a member is not asked for it.
+	const [members, plan, usage] = await Promise.all([
 		api.getOrganizationMembers(organization.id),
 		api.getOrganizationPlan(organization.id),
+		canManageOrganization(organization.role) ? api.getOrganizationUsage(organization.id) : null,
 	]);
 	event?.set('loaderData', { organization, memberCount: members.length, plan: plan.plan.name });
 
-	return { organization, members, plan, currentUser: { id: user.id, login: user.login } };
+	return { organization, members, plan, usage, currentUser: { id: user.id, login: user.login } };
 }
 
 export async function action({ request, params, context }: Route.ActionArgs) {
@@ -134,7 +138,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 }
 
 export default function OrganizationSettings({ loaderData }: Route.ComponentProps) {
-	const { organization, members, plan, currentUser } = loaderData;
+	const { organization, members, plan, usage, currentUser } = loaderData;
 	const canManage = canManageOrganization(organization.role);
 
 	return (
@@ -150,6 +154,7 @@ export default function OrganizationSettings({ loaderData }: Route.ComponentProp
 			<div className='flex flex-col gap-8'>
 				<GeneralSection organization={organization} canEdit={canManage} />
 				<PlanSection plan={plan} />
+				<UsageSection usage={usage} plan={plan.plan} />
 				<MembersSection members={members} currentUser={currentUser} callerRole={organization.role} />
 			</div>
 		</Page>

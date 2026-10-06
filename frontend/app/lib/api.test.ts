@@ -105,6 +105,13 @@ describe('Api', () => {
 			undefined,
 		],
 		[
+			'getOrganizationUsage',
+			() => api.getOrganizationUsage(organization),
+			'GET',
+			`organizations/${organization}/usage`,
+			undefined,
+		],
+		[
 			'getOrganizationMembers',
 			() => api.getOrganizationMembers(organization),
 			'GET',

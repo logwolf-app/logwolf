@@ -296,6 +296,27 @@ func (app *Config) GetOrganizationPlan(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
+// GetOrganizationUsage answers what each of the organization's projects used
+// this calendar month (UTC): its events and bytes, and its storage as last
+// measured, with the events of its deleted projects apart. It names every
+// project in the organization, those the caller is not a member of included,
+// so it is for the organization's admins and owners.
+func (app *Config) GetOrganizationUsage(w http.ResponseWriter, r *http.Request) {
+	o := organizationFromContext(r)
+
+	var usage data.OrganizationProjectsUsage
+	if err := o.client.Call("RPCServer.OrganizationProjectsUsage", &data.RPCOrganizationIDArgs{ID: o.id}, &usage); err != nil {
+		app.rpcErrorJSON(w, err, organizationNotFound)
+		return
+	}
+
+	if usage.Projects == nil {
+		usage.Projects = []data.ProjectUsageOfOrganization{}
+	}
+
+	app.writeJSON(w, http.StatusOK, jsonResponse{Error: false, Message: "OK!", Data: usage})
+}
+
 func planResponseOf(p limits.Plan) planResponse {
 	return planResponse{
 		Name:             p.Name,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -326,10 +327,7 @@ func (m *Models) GetProjectUsage(ctx context.Context, projectID primitive.Object
 		usage.Events, usage.Bytes = sums[0].Events, sums[0].Bytes
 	}
 
-	var storage struct {
-		ProjectStorage `bson:",inline"`
-		MeasuredAt     time.Time `bson:"measured_at"`
-	}
+	var storage storageMeasure
 	err = coll.FindOne(ctx,
 		bson.M{"project_id": projectID, "source": StorageSource, "measured_at": bson.M{"$lt": to}},
 		options.FindOne().SetSort(bson.D{{Key: "measured_at", Value: -1}}),
@@ -390,4 +388,163 @@ func (m *Models) ProjectQuota(ctx context.Context, projectID primitive.ObjectID,
 		return ProjectQuota{}, fmt.Errorf("ProjectQuota: %w", err)
 	}
 	return ProjectQuota{OrganizationID: o.ID.Hex(), Plan: o.Plan, Month: month, Events: events}, nil
+}
+
+// UsageTotals is the events accepted and their bytes, added up over a window.
+type UsageTotals struct {
+	Events int64 `json:"events"`
+	Bytes  int64 `json:"bytes"`
+}
+
+// ProjectUsageOfOrganization is one project's line in an organization's usage:
+// the project, and what it used.
+type ProjectUsageOfOrganization struct {
+	// ProjectID is the project's id as a hex string, the way services pass
+	// ids to each other.
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	ProjectUsage
+}
+
+// OrganizationProjectsUsage is what an organization's projects used in Month
+// (UTC), project by project: the events and bytes accepted for each, and what
+// each stores as last measured.
+//
+// Deleted adds up the events and bytes of projects that are no longer in the
+// organization. They still count toward its monthly event quota, so Projects
+// and Deleted together add up to the organization's events (OrganizationUsage).
+type OrganizationProjectsUsage struct {
+	Month    time.Time                    `json:"month"`
+	Projects []ProjectUsageOfOrganization `json:"projects"`
+	Deleted  UsageTotals                  `json:"deleted"`
+}
+
+// GetOrganizationProjectsUsage adds up, project by project, what the
+// organization's projects used in the hour buckets from from's up to, but not
+// including, to, the way GetProjectUsage does for one: the events and bytes
+// every source recorded, and the last measure of their storage taken before to.
+//
+// Every project in the organization has a line, those that used nothing
+// included, the most events first and then by name. Events and bytes are those
+// of the buckets that name the organization, like GetOrganizationEvents counts
+// them; those of projects no longer in it go to Deleted.
+func (m *Models) GetOrganizationProjectsUsage(ctx context.Context, orgID primitive.ObjectID, from, to time.Time) (OrganizationProjectsUsage, error) {
+	cursor, err := m.client.Database("logs").Collection("projects").Find(ctx,
+		bson.M{"organization_id": orgID},
+		options.Find().SetProjection(bson.M{"name": 1}),
+	)
+	if err != nil {
+		return OrganizationProjectsUsage{}, fmt.Errorf("GetOrganizationProjectsUsage projects: %w", err)
+	}
+	var projects []Project
+	if err := cursor.All(ctx, &projects); err != nil {
+		return OrganizationProjectsUsage{}, fmt.Errorf("GetOrganizationProjectsUsage projects decode: %w", err)
+	}
+
+	cursor, err = m.usage().Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"organization_id": orgID,
+			"hour":            bson.M{"$gte": UsageHour(from), "$lt": to},
+			"source":          bson.M{"$ne": StorageSource},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$project_id"},
+			{Key: "events", Value: bson.D{{Key: "$sum", Value: "$events"}}},
+			{Key: "bytes", Value: bson.D{{Key: "$sum", Value: "$bytes"}}},
+		}}},
+	})
+	if err != nil {
+		return OrganizationProjectsUsage{}, fmt.Errorf("GetOrganizationProjectsUsage: %w", err)
+	}
+	var sums []struct {
+		ProjectID   primitive.ObjectID `bson:"_id"`
+		UsageTotals `bson:",inline"`
+	}
+	if err := cursor.All(ctx, &sums); err != nil {
+		return OrganizationProjectsUsage{}, fmt.Errorf("GetOrganizationProjectsUsage decode: %w", err)
+	}
+
+	storage, err := m.lastStorageMeasures(ctx, projects, to)
+	if err != nil {
+		return OrganizationProjectsUsage{}, fmt.Errorf("GetOrganizationProjectsUsage: %w", err)
+	}
+
+	lines := make(map[primitive.ObjectID]*ProjectUsageOfOrganization, len(projects))
+	out := OrganizationProjectsUsage{
+		Month:    UsageMonth(from),
+		Projects: make([]ProjectUsageOfOrganization, len(projects)),
+	}
+	for i, p := range projects {
+		out.Projects[i] = ProjectUsageOfOrganization{ProjectID: p.ID.Hex(), Name: p.Name}
+		if s, ok := storage[p.ID]; ok {
+			out.Projects[i].Storage, out.Projects[i].StorageMeasuredAt = s.ProjectStorage, s.MeasuredAt
+		}
+		lines[p.ID] = &out.Projects[i]
+	}
+	for _, s := range sums {
+		if line, ok := lines[s.ProjectID]; ok {
+			line.Events, line.Bytes = s.Events, s.Bytes
+		} else {
+			out.Deleted.Events += s.Events
+			out.Deleted.Bytes += s.Bytes
+		}
+	}
+
+	sort.SliceStable(out.Projects, func(i, j int) bool {
+		a, b := out.Projects[i], out.Projects[j]
+		if a.Events != b.Events {
+			return a.Events > b.Events
+		}
+		return a.Name < b.Name
+	})
+	return out, nil
+}
+
+// storageMeasure is a project's storage as one measure found it.
+type storageMeasure struct {
+	ProjectStorage `bson:",inline"`
+	MeasuredAt     time.Time `bson:"measured_at"`
+}
+
+// lastStorageMeasures finds, for each of the projects, the last measure of its
+// storage taken before to. A project never measured is left out.
+func (m *Models) lastStorageMeasures(ctx context.Context, projects []Project, to time.Time) (map[primitive.ObjectID]storageMeasure, error) {
+	if len(projects) == 0 {
+		return nil, nil
+	}
+	ids := make([]primitive.ObjectID, len(projects))
+	for i, p := range projects {
+		ids[i] = p.ID
+	}
+
+	cursor, err := m.usage().Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"project_id":  bson.M{"$in": ids},
+			"source":      StorageSource,
+			"measured_at": bson.M{"$lt": to},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "measured_at", Value: -1}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$project_id"},
+			{Key: "stored_events", Value: bson.D{{Key: "$first", Value: "$stored_events"}}},
+			{Key: "stored_bytes", Value: bson.D{{Key: "$first", Value: "$stored_bytes"}}},
+			{Key: "measured_at", Value: bson.D{{Key: "$first", Value: "$measured_at"}}},
+		}}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("storage measures: %w", err)
+	}
+	var measures []struct {
+		ProjectID primitive.ObjectID `bson:"_id"`
+		Measure   storageMeasure     `bson:",inline"`
+	}
+	if err := cursor.All(ctx, &measures); err != nil {
+		return nil, fmt.Errorf("storage measures decode: %w", err)
+	}
+
+	out := make(map[primitive.ObjectID]storageMeasure, len(measures))
+	for _, s := range measures {
+		out[s.ProjectID] = s.Measure
+	}
+	return out, nil
 }

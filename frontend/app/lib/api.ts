@@ -110,6 +110,34 @@ export type OrganizationPlan = {
 	usage: { projects: number; members: number; events: number };
 };
 
+/** Events and their bytes, added up. */
+export type UsageTotals = { events: number; bytes: number };
+
+/**
+ * One project's line in its organization's usage: the events accepted for it
+ * this month and their bytes, and what it stores as last measured.
+ * `storage_measured_at` is the zero time (`0001-01-01T00:00:00Z`) until the
+ * logger first measures it.
+ */
+export type ProjectUsage = UsageTotals & {
+	project_id: string;
+	name: string;
+	storage: UsageTotals;
+	storage_measured_at: string;
+};
+
+/**
+ * What each of an organization's projects used in `month` (UTC), the most
+ * events first, every project in it included. `deleted` adds up its deleted
+ * projects, whose events still count toward the monthly quota, so the lines add
+ * up to `OrganizationPlan.usage.events`.
+ */
+export type OrganizationProjectsUsage = {
+	month: string;
+	projects: ProjectUsage[];
+	deleted: UsageTotals;
+};
+
 /** The signed-in user the broker acts for: their GitHub user ID, and their login. */
 export type ApiUser = { id: number; login: string };
 
@@ -174,6 +202,8 @@ export interface IApi {
 	getOrganizations(): Promise<UserOrganization[]>;
 	updateOrganization(id: string, name: string): Promise<UserOrganization>;
 	getOrganizationPlan(id: string): Promise<OrganizationPlan>;
+	/** For owners and admins only: it names every project in the organization. */
+	getOrganizationUsage(id: string): Promise<OrganizationProjectsUsage>;
 	getOrganizationMembers(id: string): Promise<OrganizationMember[]>;
 	addOrganizationMember(id: string, invitee: Invitee, role: OrganizationRole): Promise<void>;
 	/** `memberId` is the membership's `id`. */
@@ -442,6 +472,17 @@ export class Api implements IApi {
 			headers: this.internalHeaders(),
 		});
 		const json = (await res.json()) as ApiResponse<OrganizationPlan>;
+		if (json.error) throw new Error(json.message);
+
+		return json.data;
+	}
+
+	public async getOrganizationUsage(id: string): Promise<OrganizationProjectsUsage> {
+		const res = await fetch(`${this.baseUrl}organizations/${id}/usage`, {
+			method: 'GET',
+			headers: this.internalHeaders(),
+		});
+		const json = (await res.json()) as ApiResponse<OrganizationProjectsUsage>;
 		if (json.error) throw new Error(json.message);
 
 		return json.data;

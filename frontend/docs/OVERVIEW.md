@@ -187,7 +187,13 @@ check after the user lookup answered: that never blocks an owner.
 organizations (anyone else goes back to `/dashboard`), and shows the name, the
 plan with its usage (`getOrganizationPlan`: projects, members and this month's
 events against the plan's limits, where 0 is unlimited, and the longest
-retention), and the members. An organization whose month's events are used up
+retention), its usage by project, and the members. Usage by project
+(`getOrganizationUsage`, `components/usage-section.tsx`) lists each project's
+events and bytes this month, with its share of the plan's monthly events when
+the plan sets them, and its storage as last measured; projects deleted since
+are one line, since their events still count. The broker answers it to owners
+and admins alone, as it names every project, so the loader asks only for them
+and a member sees a note instead. An organization whose month's events are used up
 (`overQuota`) gets an alert there saying its events are refused until the first
 of next month (UTC, `quotaRenewsAt`).
 

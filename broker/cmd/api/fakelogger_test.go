@@ -681,6 +681,25 @@ func (f *fakeLogger) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *
 	return nil
 }
 
+// OrganizationProjectsUsage gives each of the organization's projects a line,
+// events and bytes zero: the fake meters nothing.
+func (f *fakeLogger) OrganizationProjectsUsage(args *data.RPCOrganizationIDArgs, reply *data.OrganizationProjectsUsage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := checkOrganizationID("OrganizationProjectsUsage", args.ID); err != nil {
+		return err
+	}
+	usage := data.OrganizationProjectsUsage{Month: data.UsageMonth(time.Now())}
+	for id, p := range f.projects {
+		if p.OrganizationID.Hex() == args.ID {
+			usage.Projects = append(usage.Projects, data.ProjectUsageOfOrganization{ProjectID: id, Name: p.Name})
+		}
+	}
+	*reply = usage
+	return nil
+}
+
 func (f *fakeLogger) AddOrganizationMember(args *data.RPCAddOrganizationMemberArgs, reply *string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

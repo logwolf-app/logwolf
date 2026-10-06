@@ -334,3 +334,107 @@ func TestRecordUsageRPC(t *testing.T) {
 		}
 	}
 }
+
+// TestOrganizationProjectsUsage: an organization's month, project by project,
+// names every project in it, those that used nothing included, with the
+// events and bytes every broker recorded and the last storage measure; what
+// projects since deleted used is added up apart, so the lines add up to the
+// organization's events.
+func TestOrganizationProjectsUsage(t *testing.T) {
+	m, _ := setupOrganizationModels(t)
+	_, db := setupUsageModels(t)
+	ctx := context.Background()
+
+	org := createOrganization(t, m, "Itemized", 3401, "itemized-owner")
+	other := createOrganization(t, m, "Elsewhere", 3402, "elsewhere-owner")
+	project := func(o *data.Organization, name string) primitive.ObjectID {
+		t.Helper()
+		p, err := m.InsertProject(data.Project{Name: name, Slug: strings.ToLower(name), OrganizationID: o.ID})
+		if err != nil {
+			t.Fatalf("InsertProject: %v", err)
+		}
+		return p.ID
+	}
+	api, web, idle, gone, theirs := project(org, "API"), project(org, "Web"), project(org, "Idle"), project(org, "Gone"), project(other, "Theirs")
+
+	month := data.UsageMonth(time.Now())
+	record := func(source string, counts ...data.UsageCount) {
+		t.Helper()
+		if err := m.RecordUsage(ctx, source, counts); err != nil {
+			t.Fatalf("RecordUsage %s: %v", source, err)
+		}
+	}
+	record("broker-a",
+		data.UsageCount{ProjectID: api, Hour: month, Events: 5, Bytes: 50},
+		data.UsageCount{ProjectID: web, Hour: month.Add(time.Hour), Events: 9, Bytes: 90},
+		data.UsageCount{ProjectID: gone, Hour: month, Events: 4, Bytes: 40},
+		data.UsageCount{ProjectID: theirs, Hour: month, Events: 100, Bytes: 1000},
+		data.UsageCount{ProjectID: api, Hour: month.Add(-time.Hour), Events: 50, Bytes: 500}, // last month
+	)
+	record("broker-b", data.UsageCount{ProjectID: api, Hour: month.Add(2 * time.Hour), Events: 2, Bytes: 20})
+
+	measured := month.Add(30 * time.Minute)
+	for _, s := range []struct {
+		at      time.Time
+		storage data.ProjectStorage
+	}{
+		{month.Add(-time.Hour), data.ProjectStorage{Events: 1, Bytes: 100}},
+		{measured, data.ProjectStorage{Events: 7, Bytes: 700}},
+	} {
+		if err := m.RecordProjectStorage(ctx, api, s.at, s.storage); err != nil {
+			t.Fatalf("RecordProjectStorage: %v", err)
+		}
+	}
+
+	if _, err := db.Collection("projects").DeleteOne(ctx, bson.M{"_id": gone}); err != nil {
+		t.Fatalf("delete project: %v", err)
+	}
+
+	got, err := m.GetOrganizationProjectsUsage(ctx, org.ID, month, data.NextUsageMonth(month))
+	if err != nil {
+		t.Fatalf("GetOrganizationProjectsUsage: %v", err)
+	}
+	if !got.Month.Equal(month) {
+		t.Errorf("month = %v, want %v", got.Month, month)
+	}
+
+	type line struct {
+		id            primitive.ObjectID
+		name          string
+		events, bytes int64
+		storage       data.ProjectStorage
+	}
+	want := []line{
+		{web, "Web", 9, 90, data.ProjectStorage{}},
+		{api, "API", 7, 70, data.ProjectStorage{Events: 7, Bytes: 700}},
+		{idle, "Idle", 0, 0, data.ProjectStorage{}},
+	}
+	if len(got.Projects) != len(want) {
+		t.Fatalf("projects = %+v, want %d lines", got.Projects, len(want))
+	}
+	for i, w := range want {
+		p := got.Projects[i]
+		if p.ProjectID != w.id.Hex() || p.Name != w.name || p.Events != w.events || p.Bytes != w.bytes || p.Storage != w.storage {
+			t.Errorf("line %d = %+v, want %+v", i, p, w)
+		}
+	}
+	if !got.Projects[1].StorageMeasuredAt.Equal(measured) {
+		t.Errorf("API's storage measured at %v, want the last measure, at %v", got.Projects[1].StorageMeasuredAt, measured)
+	}
+	if !got.Projects[0].StorageMeasuredAt.IsZero() {
+		t.Errorf("Web's storage measured at %v, want never", got.Projects[0].StorageMeasuredAt)
+	}
+	if want := (data.UsageTotals{Events: 4, Bytes: 40}); got.Deleted != want {
+		t.Errorf("deleted = %+v, want %+v", got.Deleted, want)
+	}
+
+	total, err := m.GetOrganizationEvents(ctx, org.ID, month, data.NextUsageMonth(month))
+	if err != nil || total != 9+7+4 {
+		t.Errorf("GetOrganizationEvents = %d, %v; want the lines' 20", total, err)
+	}
+
+	empty := createOrganization(t, m, "Empty", 3403, "empty-owner")
+	if got, err := m.GetOrganizationProjectsUsage(ctx, empty.ID, month, data.NextUsageMonth(month)); err != nil || len(got.Projects) != 0 || got.Deleted != (data.UsageTotals{}) {
+		t.Errorf("GetOrganizationProjectsUsage of an organization without projects = %+v, %v; want nothing", got, err)
+	}
+}

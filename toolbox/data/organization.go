@@ -165,11 +165,13 @@ type OrganizationAccess struct {
 }
 
 // OrganizationUsage is how much of its plan an organization uses, counted
-// against the plan's limits: its projects and its members. Events are not
-// counted yet.
+// against the plan's limits: its projects, its members, and the events its
+// projects have ingested in the current calendar month (UTC), as far as the
+// brokers have flushed them (see RecordUsage).
 type OrganizationUsage struct {
 	Projects int64 `json:"projects"`
 	Members  int64 `json:"members"`
+	Events   int64 `json:"events"`
 }
 
 // ValidOrganizationRole reports whether r is a recognised organization member
@@ -330,15 +332,25 @@ func (m *Models) OrganizationExists(ctx context.Context, id primitive.ObjectID) 
 // that does not exist is mongo.ErrNoDocuments (wrapped); one in no
 // organization, or in one that does not exist, is ErrUnknownOrganization.
 func (m *Models) ProjectPlan(ctx context.Context, projectID primitive.ObjectID) (string, error) {
+	o, err := m.projectOrganization(ctx, "ProjectPlan", projectID)
+	if err != nil {
+		return "", err
+	}
+	return o.Plan, nil
+}
+
+// projectOrganization returns the id and plan of the organization the project
+// is in, with ProjectPlan's errors under op's name.
+func (m *Models) projectOrganization(ctx context.Context, op string, projectID primitive.ObjectID) (Organization, error) {
 	var p Project
 	err := m.client.Database("logs").Collection("projects").
 		FindOne(ctx, bson.M{"_id": projectID}, options.FindOne().SetProjection(bson.M{"organization_id": 1})).
 		Decode(&p)
 	if err != nil {
-		return "", fmt.Errorf("ProjectPlan: %w", err)
+		return Organization{}, fmt.Errorf("%s: %w", op, err)
 	}
 	if p.OrganizationID.IsZero() {
-		return "", fmt.Errorf("ProjectPlan: project %s: %w", projectID.Hex(), ErrUnknownOrganization)
+		return Organization{}, fmt.Errorf("%s: project %s: %w", op, projectID.Hex(), ErrUnknownOrganization)
 	}
 
 	var o Organization
@@ -346,12 +358,12 @@ func (m *Models) ProjectPlan(ctx context.Context, projectID primitive.ObjectID) 
 		FindOne(ctx, bson.M{"_id": p.OrganizationID}, options.FindOne().SetProjection(bson.M{"plan": 1})).
 		Decode(&o)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return "", fmt.Errorf("ProjectPlan: project %s: %w", projectID.Hex(), ErrUnknownOrganization)
+		return Organization{}, fmt.Errorf("%s: project %s: %w", op, projectID.Hex(), ErrUnknownOrganization)
 	}
 	if err != nil {
-		return "", fmt.Errorf("ProjectPlan: %w", err)
+		return Organization{}, fmt.Errorf("%s: %w", op, err)
 	}
-	return o.Plan, nil
+	return o, nil
 }
 
 // RenameOrganization changes an organization's name, and returns it as stored,
@@ -546,7 +558,7 @@ func (m *Models) OrganizationRole(orgID primitive.ObjectID, userID int64) (strin
 }
 
 // GetOrganizationUsage counts what the organization has of what its plan
-// limits: its projects and its members.
+// limits: its projects, its members, and its events this month.
 func (m *Models) GetOrganizationUsage(ctx context.Context, orgID primitive.ObjectID) (OrganizationUsage, error) {
 	projects, err := m.client.Database("logs").Collection("projects").CountDocuments(ctx, bson.M{"organization_id": orgID})
 	if err != nil {
@@ -556,7 +568,12 @@ func (m *Models) GetOrganizationUsage(ctx context.Context, orgID primitive.Objec
 	if err != nil {
 		return OrganizationUsage{}, fmt.Errorf("GetOrganizationUsage members: %w", err)
 	}
-	return OrganizationUsage{Projects: projects, Members: members}, nil
+	month := UsageMonth(time.Now())
+	events, err := m.GetOrganizationEvents(ctx, orgID, month, NextUsageMonth(month))
+	if err != nil {
+		return OrganizationUsage{}, fmt.Errorf("GetOrganizationUsage: %w", err)
+	}
+	return OrganizationUsage{Projects: projects, Members: members, Events: events}, nil
 }
 
 // AccessToProject reports whether the project exists and the role in it of the

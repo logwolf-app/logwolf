@@ -24,6 +24,11 @@ import (
 // counting them twice. A broker that restarts is a new source, so what its
 // previous run flushed stays in that run's buckets.
 //
+// A broker's bucket also names the organization the project was in when it
+// was recorded, so an organization's events add up across its projects
+// (GetOrganizationEvents), deleted ones included: the monthly event quota is
+// the organization's, and deleting a project does not give its events back.
+//
 // The logger's storage job is the source StorageSource. Its bucket holds the
 // project's stored logs as last measured in that hour.
 //
@@ -45,6 +50,19 @@ const StorageSource = "storage"
 // UsageHour is the hour bucket t falls in: t truncated to the hour, in UTC.
 func UsageHour(t time.Time) time.Time {
 	return t.UTC().Truncate(time.Hour)
+}
+
+// UsageMonth is the calendar month t falls in, in UTC: the first instant of it.
+// The monthly event quota counts the events of the hour buckets in it.
+func UsageMonth(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+// NextUsageMonth is the first instant of the month after t's, in UTC: when a
+// quota used up in t's month is renewed.
+func NextUsageMonth(t time.Time) time.Time {
+	return UsageMonth(t).AddDate(0, 1, 0)
 }
 
 // UsageCount is a source's running total for one project in one hour: the
@@ -93,6 +111,19 @@ type ProjectUsage struct {
 	StorageMeasuredAt time.Time `json:"storage_measured_at"`
 }
 
+// ProjectQuota is what a project's events are held to under the monthly event
+// quota: the organization they count toward, the name of its plan, which sets
+// the quota, and the events the organization has ingested in Month so far, as
+// far as the brokers have flushed them.
+type ProjectQuota struct {
+	// OrganizationID is the organization's id as a hex string, the way
+	// services pass ids to each other.
+	OrganizationID string
+	Plan           string
+	Month          time.Time
+	Events         int64
+}
+
 // ErrInvalidUsage is what RecordUsage answers for counts it cannot store.
 var ErrInvalidUsage = errors.New("invalid usage")
 
@@ -102,8 +133,10 @@ func (m *Models) usage() *mongo.Collection {
 
 // EnsureUsageIndexes creates the indexes on usage: the unique (project_id,
 // hour, source), which keeps one bucket per source per project per hour and
-// serves a project's reads over a window; and the TTL index on hour, which
-// expires buckets UsageRetention after their hour. Safe to call on startup.
+// serves a project's reads over a window; (organization_id, hour), which serves
+// an organization's month (GetOrganizationEvents); and the TTL index on hour,
+// which expires buckets UsageRetention after their hour. Safe to call on
+// startup.
 func (m *Models) EnsureUsageIndexes() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -114,6 +147,13 @@ func (m *Models) EnsureUsageIndexes() error {
 		Options: options.Index().SetUnique(true).SetName("usage_project_hour_source"),
 	}); err != nil {
 		return fmt.Errorf("EnsureUsageIndexes usage.(project_id,hour,source): %w", err)
+	}
+
+	if _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "organization_id", Value: 1}, {Key: "hour", Value: 1}},
+		Options: options.Index().SetName("usage_organization_hour"),
+	}); err != nil {
+		return fmt.Errorf("EnsureUsageIndexes usage.(organization_id,hour): %w", err)
 	}
 
 	if _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -128,6 +168,10 @@ func (m *Models) EnsureUsageIndexes() error {
 // RecordUsage stores a source's running totals. Each count sets its bucket to
 // the larger of the stored values and its own, so it can be sent any number of
 // times, in any order, and the bucket ends at the source's latest total.
+//
+// Each bucket is also given the organization its project is in now, for
+// GetOrganizationEvents. One whose project no longer exists keeps the
+// organization it already names.
 //
 // The source must be a broker's: neither empty nor StorageSource. Counts are
 // refused whole, before any write, if one is negative.
@@ -144,14 +188,23 @@ func (m *Models) RecordUsage(ctx context.Context, source string, counts []UsageC
 		return nil
 	}
 
+	orgs, err := m.organizationsOfProjects(ctx, counts)
+	if err != nil {
+		return fmt.Errorf("RecordUsage: %w", err)
+	}
+
 	now := time.Now()
 	writes := make([]mongo.WriteModel, len(counts))
 	for i, c := range counts {
+		set := bson.M{"updated_at": now}
+		if org, ok := orgs[c.ProjectID]; ok {
+			set["organization_id"] = org
+		}
 		writes[i] = mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"project_id": c.ProjectID, "hour": UsageHour(c.Hour), "source": source}).
 			SetUpdate(bson.M{
 				"$max": bson.M{"events": c.Events, "bytes": c.Bytes},
-				"$set": bson.M{"updated_at": now},
+				"$set": set,
 			}).
 			SetUpsert(true)
 	}
@@ -159,6 +212,40 @@ func (m *Models) RecordUsage(ctx context.Context, source string, counts []UsageC
 		return fmt.Errorf("RecordUsage: %w", err)
 	}
 	return nil
+}
+
+// organizationsOfProjects maps the projects counts name to the organizations
+// they are in. A project that does not exist, or is in no organization, is
+// left out.
+func (m *Models) organizationsOfProjects(ctx context.Context, counts []UsageCount) (map[primitive.ObjectID]primitive.ObjectID, error) {
+	ids := make([]primitive.ObjectID, 0, len(counts))
+	seen := make(map[primitive.ObjectID]bool, len(counts))
+	for _, c := range counts {
+		if !seen[c.ProjectID] {
+			seen[c.ProjectID] = true
+			ids = append(ids, c.ProjectID)
+		}
+	}
+
+	cursor, err := m.client.Database("logs").Collection("projects").Find(ctx,
+		bson.M{"_id": bson.M{"$in": ids}},
+		options.Find().SetProjection(bson.M{"organization_id": 1}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("organizations of projects: %w", err)
+	}
+	var projects []Project
+	if err := cursor.All(ctx, &projects); err != nil {
+		return nil, fmt.Errorf("organizations of projects decode: %w", err)
+	}
+
+	orgs := make(map[primitive.ObjectID]primitive.ObjectID, len(projects))
+	for _, p := range projects {
+		if !p.OrganizationID.IsZero() {
+			orgs[p.ID] = p.OrganizationID
+		}
+	}
+	return orgs, nil
 }
 
 // MeasureProjectStorage counts a project's logs and adds up their sizes. It
@@ -255,4 +342,52 @@ func (m *Models) GetProjectUsage(ctx context.Context, projectID primitive.Object
 		usage.Storage, usage.StorageMeasuredAt = storage.ProjectStorage, storage.MeasuredAt
 	}
 	return usage, nil
+}
+
+// GetOrganizationEvents adds up the events every source recorded for the
+// organization's projects, deleted ones included, in the hour buckets from
+// from's up to, but not including, to.
+func (m *Models) GetOrganizationEvents(ctx context.Context, orgID primitive.ObjectID, from, to time.Time) (int64, error) {
+	cursor, err := m.usage().Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"organization_id": orgID,
+			"hour":            bson.M{"$gte": UsageHour(from), "$lt": to},
+			"source":          bson.M{"$ne": StorageSource},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "events", Value: bson.D{{Key: "$sum", Value: "$events"}}},
+		}}},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("GetOrganizationEvents: %w", err)
+	}
+	var sums []struct {
+		Events int64 `bson:"events"`
+	}
+	if err := cursor.All(ctx, &sums); err != nil {
+		return 0, fmt.Errorf("GetOrganizationEvents decode: %w", err)
+	}
+	if len(sums) == 0 {
+		return 0, nil
+	}
+	return sums[0].Events, nil
+}
+
+// ProjectQuota returns what the project's events are held to in the month of
+// now: its organization, that organization's plan, and the events the
+// organization has ingested in that month so far. It fails like ProjectPlan: a
+// project that does not exist is mongo.ErrNoDocuments (wrapped); one in no
+// organization, or in one that does not exist, is ErrUnknownOrganization.
+func (m *Models) ProjectQuota(ctx context.Context, projectID primitive.ObjectID, now time.Time) (ProjectQuota, error) {
+	o, err := m.projectOrganization(ctx, "ProjectQuota", projectID)
+	if err != nil {
+		return ProjectQuota{}, err
+	}
+	month := UsageMonth(now)
+	events, err := m.GetOrganizationEvents(ctx, o.ID, month, NextUsageMonth(month))
+	if err != nil {
+		return ProjectQuota{}, fmt.Errorf("ProjectQuota: %w", err)
+	}
+	return ProjectQuota{OrganizationID: o.ID.Hex(), Plan: o.Plan, Month: month, Events: events}, nil
 }

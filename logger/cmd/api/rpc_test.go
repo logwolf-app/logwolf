@@ -181,6 +181,10 @@ func TestProjectScopedMethods_MalformedProjectID(t *testing.T) {
 			var reply string
 			return srv.ProjectPlan(&data.RPCProjectIDArgs{ID: bad}, &reply)
 		},
+		"ProjectQuota": func() error {
+			var reply data.ProjectQuota
+			return srv.ProjectQuota(&data.RPCProjectIDArgs{ID: bad}, &reply)
+		},
 	} {
 		err := call()
 		if err == nil || !strings.Contains(err.Error(), "not a valid ObjectID") {

@@ -18,6 +18,40 @@ func TestUsageHour(t *testing.T) {
 	}
 }
 
+// Months are calendar months in UTC, like the hour buckets they add up: late on
+// the last day somewhere west of UTC is already the next month.
+func TestUsageMonth(t *testing.T) {
+	loc := time.FixedZone("UTC-3", -3*60*60)
+	cases := []struct {
+		at         time.Time
+		month, end time.Time
+	}{
+		{
+			at:    time.Date(2026, 10, 31, 21, 0, 0, 0, loc),
+			month: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+			end:   time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			at:    time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+			month: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC),
+			end:   time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			at:    time.Date(2028, 2, 29, 12, 0, 0, 0, time.UTC),
+			month: time.Date(2028, 2, 1, 0, 0, 0, 0, time.UTC),
+			end:   time.Date(2028, 3, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	for _, tc := range cases {
+		if got := UsageMonth(tc.at); !got.Equal(tc.month) || got.Location() != time.UTC {
+			t.Errorf("UsageMonth(%v) = %v, want %v", tc.at, got, tc.month)
+		}
+		if got := NextUsageMonth(tc.at); !got.Equal(tc.end) || got.Location() != time.UTC {
+			t.Errorf("NextUsageMonth(%v) = %v, want %v", tc.at, got, tc.end)
+		}
+	}
+}
+
 // The checks below run before any query. The zero-value Models has no database,
 // so a call that got past them would panic instead of answering.
 

@@ -25,7 +25,7 @@ app/
 ├── context.ts            # React context for event tracking
 ├── app.css               # Global Tailwind CSS
 ├── components/
-│   ├── nav/              # Header, sidebar, organization and project switchers, page wrapper
+│   ├── nav/              # Header, sidebar, organization and project switchers, page wrapper, quota banner
 │   ├── settings/         # Layout and action result shared by the settings pages
 │   └── ui/               # 25+ reusable UI primitives (button, table, dialog, etc.)
 ├── pages/
@@ -185,9 +185,19 @@ check after the user lookup answered: that never blocks an owner.
 
 `/organizations/:id/settings` resolves the `:id` against the caller's own
 organizations (anyone else goes back to `/dashboard`), and shows the name, the
-plan with its usage (`getOrganizationPlan`: projects and members against the
-plan's limits, where 0 is unlimited; monthly events and the longest retention,
-which are not counted yet), and the members. Owners and admins rename it and
+plan with its usage (`getOrganizationPlan`: projects, members and this month's
+events against the plan's limits, where 0 is unlimited, and the longest
+retention), and the members. An organization whose month's events are used up
+(`overQuota`) gets an alert there saying its events are refused until the first
+of next month (UTC, `quotaRenewsAt`).
+
+The layout loader asks for the current organization's plan too, unless it is on
+the self-hosted plan, which limits nothing, and every page under it shows a
+banner (`components/nav/quota-banner.tsx`) while that organization is over its
+quota, linking to its settings. The SDK's refusals are easy to miss, and nothing
+else would explain why new events stopped. A plan that cannot be read leaves the
+banner out, not the page. Dashboard events count toward the quota too, so
+`/events/new` is refused with the broker's message while the banner shows. Owners and admins rename it and
 manage members; only owners add, promote, demote or remove an owner, so an admin
 sees an owner's row without controls and cannot pick `owner` when adding. The
 broker enforces all of it, and the action repeats what the form alone shows (the

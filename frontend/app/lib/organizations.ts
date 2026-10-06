@@ -1,4 +1,4 @@
-import type { OrganizationRole, Project } from './api';
+import type { OrganizationPlan, OrganizationRole, Project } from './api';
 
 type HasId = { id: string };
 
@@ -78,3 +78,28 @@ export function assignableOrganizationRoles(role: OrganizationRole): Organizatio
 
 /** The role as a sentence names it: "an owner", "an admin", "a member". */
 export const withArticle = (role: OrganizationRole) => (role === 'member' ? 'a member' : `an ${role}`);
+
+/**
+ * The plan of every organization on a self-hosted install
+ * (`data.SelfHostedPlan`), which limits nothing.
+ */
+export const SELF_HOSTED_PLAN = 'selfhosted';
+
+/**
+ * Whether the organization has used its plan's monthly events: the broker
+ * refuses its projects' events, the dashboard's too, until the month is over.
+ * A plan without a monthly limit never has.
+ */
+export function overQuota({ plan, usage }: OrganizationPlan): boolean {
+	return plan.monthly_events > 0 && usage.events >= plan.monthly_events;
+}
+
+/** When a quota used up at `now` renews: the first instant of the next month, in UTC. */
+export function quotaRenewsAt(now: Date = new Date()): Date {
+	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+}
+
+/** The day a quota renews, as the dashboard words it: "November 1". */
+export function formatRenewal(renewsAt: Date | string, locale: string): string {
+	return new Date(renewsAt).toLocaleDateString(locale, { month: 'long', day: 'numeric', timeZone: 'UTC' });
+}

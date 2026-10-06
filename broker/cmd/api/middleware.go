@@ -236,7 +236,8 @@ const authCacheSweepInterval = time.Minute
 // sweepAuthCaches deletes the keyCache entries and ipLimiter windows that have
 // expired by now, and the ingestBuckets that are full again and have not been
 // sized for ingestPlanTTL: a key's next request starts it again from a full
-// bucket, which is what it would have found.
+// bucket, which is what it would have found. It also sweeps the monthly quotas
+// (sweepQuotas).
 func sweepAuthCaches(now time.Time) {
 	keyCacheMu.Lock()
 	for k, e := range keyCache {
@@ -261,6 +262,8 @@ func sweepAuthCaches(now time.Time) {
 		}
 	}
 	ingestBucketsMu.Unlock()
+
+	sweepQuotas(now)
 }
 
 // sweepAuthCachesEvery runs sweepAuthCaches every interval until ctx is done.
@@ -318,7 +321,7 @@ func (app *Config) requireAPIKeyWith(v keyValidator, next http.Handler) http.Han
 			log.Printf(`{"event":"auth","outcome":"deny","reason":"rate_limited","method":"%s","path":"%s","remote_addr":"%s","client_ip":"%s"}`,
 				r.Method, r.URL.Path, r.RemoteAddr, ip)
 			setRetryAfter(w, wait)
-			app.errorJSON(w, fmt.Errorf("too many failed attempts"), http.StatusTooManyRequests)
+			app.errorCodeJSON(w, fmt.Errorf("too many failed attempts"), http.StatusTooManyRequests, codeRateLimited)
 			return
 		}
 

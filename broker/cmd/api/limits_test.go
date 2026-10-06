@@ -23,7 +23,9 @@ func (p *planLimits) Plan(context.Context, string) (limits.Plan, error) {
 	return limits.Plan{Name: "fixed"}, p.err
 }
 
-func (p *planLimits) AllowIngest(context.Context, string, int) (bool, error) { return true, nil }
+func (p *planLimits) MonthlyQuota(context.Context, string) (limits.Quota, error) {
+	return limits.Quota{}, nil
+}
 
 func (p *planLimits) RetentionChoices(_ context.Context, projectID string) ([]int, error) {
 	p.asked = append(p.asked, projectID)
@@ -128,7 +130,7 @@ func TestRetention_ProviderFailureIsAnInternalError(t *testing.T) {
 // A broker on the hosted edition offers each project the retention of its
 // organization's plan, which it asks the logger for, and stores nothing else.
 func TestRetention_CloudChoicesComeFromTheOrganizationsPlan(t *testing.T) {
-	handler, fake := newLimitedTestServer(t, limits.Organizations{PlanOf: projectPlan})
+	handler, fake := newLimitedTestServer(t, limits.Organizations{PlanOf: projectPlan, QuotaOf: projectQuota})
 	fake.setPlan(projAlpha, limits.PlanPro)
 
 	w := do(handler, internalRequest(http.MethodGet, "/projects/"+projAlpha+"/retention", "member-a", nil))
@@ -165,7 +167,7 @@ func TestRetention_CloudChoicesComeFromTheOrganizationsPlan(t *testing.T) {
 // on a plan the broker does not know, is offered nothing rather than
 // everything.
 func TestRetention_CloudWithoutAKnownPlanIsAnInternalError(t *testing.T) {
-	handler, fake := newLimitedTestServer(t, limits.Organizations{PlanOf: projectPlan})
+	handler, fake := newLimitedTestServer(t, limits.Organizations{PlanOf: projectPlan, QuotaOf: projectQuota})
 	fake.setPlan(projBeta, "enterprise")
 
 	for project, member := range map[string]string{projAlpha: "member-a", projBeta: "owner-b"} {

@@ -19,11 +19,14 @@ import (
 // the caller is not a member, or is a member where an owner is needed.
 // authorizeProject is that rule; requireProject applies it to the routes.
 
-// accessLevel is who may use a route.
+// accessLevel is who may use a route. Projects have owners and members alone,
+// so on a project route anything above anyMember is owner-only; organizations
+// have admins between the two.
 type accessLevel int
 
 const (
 	anyMember accessLevel = iota
+	adminOnly
 	ownerOnly
 )
 
@@ -79,7 +82,7 @@ func (app *Config) authorizeProject(w http.ResponseWriter, r *http.Request, clie
 	case access.Role == "":
 		app.errorJSON(w, fmt.Errorf("forbidden"), http.StatusForbidden)
 		return "", false
-	case need == ownerOnly && access.Role != data.RoleOwner:
+	case need != anyMember && access.Role != data.RoleOwner:
 		app.errorJSON(w, fmt.Errorf("only an owner can do this"), http.StatusForbidden)
 		return "", false
 	}

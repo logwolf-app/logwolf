@@ -2,6 +2,8 @@ import { Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useFetcher } from 'react-router';
 
+import type { SettingsActionResult } from '~/components/settings/action-result';
+import { SettingsRow } from '~/components/settings/settings-row';
 import { Alert, AlertTitle } from '~/components/ui/alert';
 import { Button } from '~/components/ui/button';
 import { Card } from '~/components/ui/card';
@@ -17,9 +19,6 @@ import { Field, FieldGroup, FieldLabel } from '~/components/ui/field';
 import { Input } from '~/components/ui/input';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
 import type { UserProject } from '~/lib/api';
-
-import type { SettingsActionResult } from '../action-result';
-import { SettingsRow } from './settings-row';
 
 type Props = { project: UserProject };
 

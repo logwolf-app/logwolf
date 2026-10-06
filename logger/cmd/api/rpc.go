@@ -201,8 +201,9 @@ func (r *RPCServer) GetMetrics(args *data.ProjectArgs, reply *data.Metrics) erro
 }
 
 // CreateProject creates a project owned by the user args.OwnerID, whose login is
-// args.Owner. The project and the owner membership are written in one
-// transaction, so a failure leaves neither.
+// args.Owner, inside the organization args.OrganizationID, or the deployment's
+// Default organization when it names none. The project and the owner membership
+// are written in one transaction, so a failure leaves neither.
 func (r *RPCServer) CreateProject(args *data.RPCCreateProjectArgs, reply *data.Project) error {
 	if args.Name == "" {
 		return fmt.Errorf("CreateProject: name is required")
@@ -213,14 +214,40 @@ func (r *RPCServer) CreateProject(args *data.RPCCreateProjectArgs, reply *data.P
 	if args.OwnerID <= 0 || data.NormalizeGithubLogin(args.Owner) == "" {
 		return fmt.Errorf("CreateProject: owner is required")
 	}
-	log.Printf("Creating project: %s (%s) owned by %s (%d)", args.Name, args.Slug, args.Owner, args.OwnerID)
-	project, err := r.models.CreateProjectWithOwner(data.Project{Name: args.Name, Slug: args.Slug}, args.OwnerID, args.Owner)
+
+	orgID, err := r.newProjectOrganization(args.OrganizationID)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Creating project: %s (%s) owned by %s (%d) in organization %s", args.Name, args.Slug, args.Owner, args.OwnerID, orgID.Hex())
+	project, err := r.models.CreateProjectWithOwner(data.Project{Name: args.Name, Slug: args.Slug, OrganizationID: orgID}, args.OwnerID, args.Owner)
 	if err != nil {
 		log.Println("Error creating project:", err)
 		return err
 	}
 	*reply = *project
 	return nil
+}
+
+// newProjectOrganization is the organization CreateProject puts a project in:
+// the one hex names, or the Default organization when hex is empty. Whether
+// the named one exists is CreateProjectWithOwner's to check, in its transaction
+// (data.ErrUnknownOrganization).
+func (r *RPCServer) newProjectOrganization(hex string) (primitive.ObjectID, error) {
+	if hex != "" {
+		return parseOrganizationID("CreateProject", hex)
+	}
+
+	org, err := r.models.GetDefaultOrganization()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return primitive.NilObjectID, fmt.Errorf("CreateProject: no organization to create the project in until the startup migration has run")
+	}
+	if err != nil {
+		log.Println("Error finding the organization for a new project:", err)
+		return primitive.NilObjectID, err
+	}
+	return org.ID, nil
 }
 
 func (r *RPCServer) GetProject(args *data.RPCProjectIDArgs, reply *data.Project) error {
@@ -382,29 +409,18 @@ func (r *RPCServer) UpdateMemberRole(args *data.RPCUpdateMemberRoleArgs, reply *
 
 // ProjectAccess reports whether the project exists and the caller's role in it,
 // the caller being a GitHub user ID with, for memberships not yet linked to a
-// user, their current login. A member's project exists, so only a non-member
-// costs a second query.
+// user, their current login. An owner of the project's organization is owner
+// of the project, member or not (data.AccessToProject).
 func (r *RPCServer) ProjectAccess(args *data.RPCProjectAccessArgs, reply *data.ProjectAccess) error {
 	projectID, err := parseProjectID("ProjectAccess", args.ProjectID)
 	if err != nil {
 		return err
 	}
-	role, err := r.models.MemberRole(projectID, args.UserID, args.GithubLogin)
+	access, err := r.models.AccessToProject(projectID, args.UserID, args.GithubLogin)
 	if err != nil {
 		return err
 	}
-	if role != "" {
-		*reply = data.ProjectAccess{Exists: true, Role: role}
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	exists, err := r.models.ProjectExists(ctx, projectID)
-	if err != nil {
-		return err
-	}
-	*reply = data.ProjectAccess{Exists: exists}
+	*reply = access
 	return nil
 }
 
@@ -423,6 +439,218 @@ func (r *RPCServer) ListMembers(args *data.ProjectArgs, reply *[]data.ProjectMem
 	return nil
 }
 
+// --- Organizations ---
+//
+// An organization sits above projects and holds the plan. Its id travels as a
+// hex string like a project's, and is parsed once here.
+
+// parseOrganizationID turns the hex organization id an RPC argument carries into
+// an ObjectID. A malformed one names no organization; the error says "invalid
+// organization ID", for the broker to answer as not found.
+func parseOrganizationID(op, hex string) (primitive.ObjectID, error) {
+	id, err := primitive.ObjectIDFromHex(hex)
+	if err != nil {
+		return primitive.NilObjectID, fmt.Errorf("%s: invalid organization ID: %w", op, err)
+	}
+	return id, nil
+}
+
+// CreateOrganization creates an organization on args.Plan owned by the user
+// args.OwnerID, whose login is args.Owner. The organization and the owner
+// membership are written in one transaction, so a failure leaves neither.
+func (r *RPCServer) CreateOrganization(args *data.RPCCreateOrganizationArgs, reply *data.Organization) error {
+	log.Printf("Creating organization: %s (%s) owned by %s (%d)", args.Name, args.Plan, args.Owner, args.OwnerID)
+	org, err := r.models.CreateOrganizationWithOwner(data.Organization{Name: args.Name, Plan: args.Plan}, args.OwnerID, args.Owner)
+	if err != nil {
+		log.Println("Error creating organization:", err)
+		return err
+	}
+	*reply = *org
+	return nil
+}
+
+func (r *RPCServer) GetOrganization(args *data.RPCOrganizationIDArgs, reply *data.Organization) error {
+	id, err := parseOrganizationID("GetOrganization", args.ID)
+	if err != nil {
+		return err
+	}
+	org, err := r.models.GetOrganization(id)
+	if err != nil {
+		log.Println("Error getting organization:", err)
+		return err
+	}
+	*reply = *org
+	return nil
+}
+
+// ProjectPlan answers the name of the plan of the organization the project is
+// in. The hosted edition's limits.Provider resolves a project's limits from it.
+func (r *RPCServer) ProjectPlan(args *data.RPCProjectIDArgs, reply *string) error {
+	id, err := parseProjectID("ProjectPlan", args.ID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	plan, err := r.models.ProjectPlan(ctx, id)
+	if err != nil {
+		log.Println("Error getting project plan:", err)
+		return err
+	}
+	*reply = plan
+	return nil
+}
+
+// UpdateOrganization renames an organization. Its plan is not changed here.
+func (r *RPCServer) UpdateOrganization(args *data.RPCUpdateOrganizationArgs, reply *data.Organization) error {
+	log.Printf("Renaming organization: %s", args.ID)
+	id, err := parseOrganizationID("UpdateOrganization", args.ID)
+	if err != nil {
+		return err
+	}
+	org, err := r.models.RenameOrganization(id, args.Name)
+	if err != nil {
+		log.Println("Error renaming organization:", err)
+		return err
+	}
+	*reply = *org
+	return nil
+}
+
+// ListUserOrganizations lists the organizations of the user args.UserID, each
+// with the role they hold in it.
+func (r *RPCServer) ListUserOrganizations(args *data.RPCUserOrganizationsArgs, reply *[]data.UserOrganization) error {
+	orgs, err := r.models.GetOrganizationsForUser(args.UserID)
+	if err != nil {
+		log.Println("Error listing user organizations:", err)
+		return err
+	}
+	*reply = orgs
+	return nil
+}
+
+// OrganizationAccess reports whether the organization exists and the caller's
+// role in it. A member's organization exists, so only a non-member costs a
+// second query.
+func (r *RPCServer) OrganizationAccess(args *data.RPCOrganizationAccessArgs, reply *data.OrganizationAccess) error {
+	orgID, err := parseOrganizationID("OrganizationAccess", args.OrganizationID)
+	if err != nil {
+		return err
+	}
+	role, err := r.models.OrganizationRole(orgID, args.UserID)
+	if err != nil {
+		return err
+	}
+	if role != "" {
+		*reply = data.OrganizationAccess{Exists: true, Role: role}
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	exists, err := r.models.OrganizationExists(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	*reply = data.OrganizationAccess{Exists: exists}
+	return nil
+}
+
+func (r *RPCServer) ListOrganizationMembers(args *data.RPCOrganizationIDArgs, reply *[]data.OrganizationMember) error {
+	orgID, err := parseOrganizationID("ListOrganizationMembers", args.ID)
+	if err != nil {
+		return err
+	}
+	members, err := r.models.GetOrganizationMembers(orgID)
+	if err != nil {
+		log.Println("Error listing organization members:", err)
+		return err
+	}
+	*reply = members
+	return nil
+}
+
+// OrganizationUsage counts what the organization has of what its plan limits:
+// its projects and members.
+func (r *RPCServer) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *data.OrganizationUsage) error {
+	orgID, err := parseOrganizationID("OrganizationUsage", args.ID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	usage, err := r.models.GetOrganizationUsage(ctx, orgID)
+	if err != nil {
+		log.Println("Error counting organization usage:", err)
+		return err
+	}
+	*reply = usage
+	return nil
+}
+
+// AddOrganizationMember adds the user args.UserID to an organization. A user
+// who is a member already is refused with a duplicate key error.
+func (r *RPCServer) AddOrganizationMember(args *data.RPCAddOrganizationMemberArgs, reply *string) error {
+	orgID, err := parseOrganizationID("AddOrganizationMember", args.OrganizationID)
+	if err != nil {
+		return err
+	}
+	log.Printf("Adding member %s (%d) to organization %s as %s", args.GithubLogin, args.UserID, args.OrganizationID, args.Role)
+	_, err = r.models.InsertOrganizationMember(data.OrganizationMember{
+		OrganizationID: orgID,
+		UserID:         args.UserID,
+		GithubLogin:    args.GithubLogin,
+		Role:           args.Role,
+	})
+	if err != nil {
+		log.Println("Error adding organization member:", err)
+		return err
+	}
+	*reply = "ok"
+	return nil
+}
+
+func (r *RPCServer) RemoveOrganizationMember(args *data.RPCRemoveOrganizationMemberArgs, reply *string) error {
+	log.Printf("Removing member %s from organization %s", args.MemberID, args.OrganizationID)
+	orgID, err := parseOrganizationID("RemoveOrganizationMember", args.OrganizationID)
+	if err != nil {
+		return err
+	}
+	memberID, err := parseMemberID("RemoveOrganizationMember", args.MemberID)
+	if err != nil {
+		return err
+	}
+	if err := r.models.RemoveOrganizationMember(orgID, memberID, args.ActorRole); err != nil {
+		log.Println("Error removing organization member:", err)
+		return err
+	}
+	*reply = "ok"
+	return nil
+}
+
+func (r *RPCServer) UpdateOrganizationMemberRole(args *data.RPCUpdateOrganizationMemberRoleArgs, reply *string) error {
+	if !data.ValidOrganizationRole(args.Role) {
+		return fmt.Errorf("UpdateOrganizationMemberRole: invalid role %q", args.Role)
+	}
+	log.Printf("Setting role of member %s in organization %s to %s", args.MemberID, args.OrganizationID, args.Role)
+	orgID, err := parseOrganizationID("UpdateOrganizationMemberRole", args.OrganizationID)
+	if err != nil {
+		return err
+	}
+	memberID, err := parseMemberID("UpdateOrganizationMemberRole", args.MemberID)
+	if err != nil {
+		return err
+	}
+	if err := r.models.UpdateOrganizationMemberRole(orgID, memberID, args.Role, args.ActorRole); err != nil {
+		log.Println("Error updating organization member role:", err)
+		return err
+	}
+	*reply = "ok"
+	return nil
+}
+
 // --- Users ---
 //
 // A user is keyed by their GitHub user ID, which survives a rename; the login
@@ -430,9 +658,11 @@ func (r *RPCServer) ListMembers(args *data.ProjectArgs, reply *[]data.ProjectMem
 
 // UpsertUser records a sign-in: it creates the user with this GitHub ID, or
 // refreshes the login and email of the existing one, links the memberships
-// stored before user IDs under their login to them (data.LinkMemberships), and
-// replies with the user as stored. A failure in either step fails the sign-in;
-// both are idempotent, so the next one finishes the job.
+// stored before user IDs under their login to them (data.LinkMemberships),
+// makes them owner of the organizations waiting for their login
+// (data.ClaimPendingOwnerships), and replies with the user as stored. A failure
+// in any step fails the sign-in; each is idempotent, so the next one finishes
+// the job.
 func (r *RPCServer) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) error {
 	log.Printf("Upserting user %d (%s)", args.GithubID, args.GithubLogin)
 	user, err := r.models.UpsertUser(args.GithubID, args.GithubLogin, args.Email)
@@ -449,6 +679,16 @@ func (r *RPCServer) UpsertUser(args *data.RPCUpsertUserArgs, reply *data.User) e
 	if links.Linked > 0 || links.Merged > 0 {
 		log.Printf("Linked memberships of %s to user %d: linked=%d merged=%d",
 			user.GithubLogin, user.GithubID, links.Linked, links.Merged)
+	}
+
+	claimed, err := r.models.ClaimPendingOwnerships(user.GithubID, user.GithubLogin)
+	if err != nil {
+		log.Println("Error claiming pending organization ownerships:", err)
+		return err
+	}
+	if claimed > 0 {
+		log.Printf("User %d (%s) became owner of organizations=%d they were pending owner of",
+			user.GithubID, user.GithubLogin, claimed)
 	}
 
 	*reply = *user

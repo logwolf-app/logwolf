@@ -2,7 +2,7 @@ import { redirect } from 'react-router';
 
 import { Page } from '~/components/nav/page';
 import { eventContext } from '~/context';
-import { allowlistFromEnv, checkInvitee, inviteWarning } from '~/lib/allowlist.server';
+import { allowlistFromEnv, checkInvitee, inviteeFromCheck, inviteWarning } from '~/lib/allowlist.server';
 import { createApi } from '~/lib/api';
 import { requireAuth } from '~/lib/auth.server';
 import { validateCsrfToken } from '~/lib/csrf.server';
@@ -108,18 +108,11 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			// Asked as the owner, so an allowed org's private members are seen.
 			const check = await checkInvitee(login, allowlistFromEnv(), fetch, await getGithubToken(request));
 			event?.set('inviteCheck', check.kind);
-			if (check.kind === 'unknown') return { error: `There is no GitHub user named ${login}.` };
-			if (check.kind === 'organization') {
-				return { error: `${check.login} is a GitHub organization; only users can be members.` };
-			}
-			// The membership belongs to the GitHub user ID behind the login, so
-			// without GitHub's answer there is nobody to add.
-			if (check.id === undefined) {
-				return { error: `Could not reach GitHub to look up ${check.login}. Try again in a moment.` };
-			}
+			const resolved = inviteeFromCheck(login, check);
+			if ('error' in resolved) return resolved;
 
-			await api.addMember(project.id, { id: check.id, login: check.login }, role);
-			return { success: `Added ${check.login} as ${role}.`, warning: inviteWarning(check) };
+			await api.addMember(project.id, resolved.invitee, role);
+			return { success: `Added ${resolved.invitee.login} as ${role}.`, warning: inviteWarning(check) };
 		}
 
 		// Members are named by their membership's id; the login only words the

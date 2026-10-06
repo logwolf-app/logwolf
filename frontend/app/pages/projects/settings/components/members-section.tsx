@@ -2,6 +2,8 @@ import { Plus, Trash2, TriangleAlert } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { useFetcher } from 'react-router';
 
+import { type SettingsActionResult, useSuccessToast } from '~/components/settings/action-result';
+import { SettingsRow } from '~/components/settings/settings-row';
 import { Alert, AlertDescription, AlertTitle } from '~/components/ui/alert';
 import { Badge } from '~/components/ui/badge';
 import { Button } from '~/components/ui/button';
@@ -13,9 +15,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '~
 import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
 import type { ProjectMember } from '~/lib/api';
-
-import { type SettingsActionResult, useSuccessToast } from '../action-result';
-import { SettingsRow } from './settings-row';
 
 type Props = { members: ProjectMember[]; currentUser: { id: number; login: string }; canManage: boolean };
 

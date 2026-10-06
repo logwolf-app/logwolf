@@ -1,6 +1,8 @@
 import { Check } from 'lucide-react';
 import { useFetcher } from 'react-router';
 
+import { type SettingsActionResult, useSuccessToast } from '~/components/settings/action-result';
+import { SettingsFooter, SettingsRow } from '~/components/settings/settings-row';
 import { Alert, AlertTitle } from '~/components/ui/alert';
 import { Button } from '~/components/ui/button';
 import { Card } from '~/components/ui/card';
@@ -16,9 +18,6 @@ import {
 } from '~/components/ui/select';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
 import { lowersRetention, retentionLabel, retentionOptions } from '~/lib/retention';
-
-import { type SettingsActionResult, useSuccessToast } from '../action-result';
-import { SettingsFooter, SettingsRow } from './settings-row';
 
 type Props = {
 	days: number;

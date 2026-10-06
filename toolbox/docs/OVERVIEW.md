@@ -15,6 +15,8 @@ toolbox/
 │   ├── apikey.go    # APIKey model, key generation, validation
 │   ├── settings.go  # Per-project retention settings, index management
 │   ├── project.go   # Project and ProjectMember models, membership queries
+│   ├── organization.go # Organization and OrganizationMember models, membership queries
+│   ├── user.go      # Users, keyed by GitHub user ID
 │   ├── migrate.go   # Startup migration of pre-multi-tenancy data
 │   └── log.go       # Log entry type aliases
 ├── event/
@@ -23,7 +25,8 @@ toolbox/
 │   ├── consumer.go  # RabbitMQ message consumer: manual acks, retries
 │   └── logger_client.go # The consumer's one reused RPC connection to Logger
 ├── limits/
-│   └── limits.go    # LimitsProvider: what an edition lets a project do
+│   ├── limits.go    # LimitsProvider: what an edition lets a project do
+│   └── plans.go     # The plans, in code: what each lets an organization do
 ├── rabbitmq/
 │   └── connect.go   # RabbitMQ connection initialisation
 └── json/
@@ -74,7 +77,7 @@ A project's `Slug` is a display label, derived from its name when it is created 
 
 Three operations run in MongoDB transactions, so MongoDB must run as a replica set (a single member is enough, and that is how `docker-compose.yml` and the integration tests run it):
 
-- `CreateProjectWithOwner` inserts a project and its first owner's membership as one unit. A project without an owner could never be reached, since only owners add members.
+- `CreateProjectWithOwner` inserts a project and its first owner's membership as one unit. A project without an owner could never be reached, since only owners add members. The project is created inside `p.OrganizationID` (`organization_id`), which is required and must exist (`ErrUnknownOrganization`); a `project_organization_id` index serves lookups by organization.
 - `DeleteProject` removes the project's API keys, settings, members and the project itself as one unit. A failure part-way rolls the whole thing back. The logs are left out, since a big project's would outlast the transaction; `PurgeProjectLogs` deletes them afterwards and refuses (`ErrProjectExists`) for a project that still exists.
 - `RemoveProjectMember` and `UpdateProjectMemberRole` count the owners and remove or demote the member in one transaction (`changeMembers`), and write to the project document first (`members_updated_at`). A transaction on its own would still let two concurrent removals or demotions of different owners both pass the count. The write to a shared document forces a write conflict, `WithTransaction` retries the loser, and the retry sees `ErrLastOwner`. Setting the role a member already holds is a no-op.
 
@@ -92,9 +95,25 @@ A `User` is someone who has signed in, keyed by their GitHub user ID (`github_id
 
 `UpsertUser(githubID, login, email)` records a sign-in: it creates the user, or refreshes the login and email of the existing one, and returns the user as stored. The `_id` and `created_at` never change. An empty email clears a stored one, since the user has made theirs private. Two simultaneous first sign-ins of one account leave one user: the unique index refuses the second insert, which retries as an update. It refuses (`ErrInvalidUser`) a user with no positive GitHub ID or no login. `GetUserByGithubID` returns `mongo.ErrNoDocuments`, wrapped, for someone who has never signed in. Logger exposes both over RPC (`RPCUpsertUserArgs`, `RPCGetUserArgs` → `RPCGetUserReply`).
 
+### Organizations (`organization.go`)
+
+An `Organization` sits above projects: it owns them, holds the plan, and so sets their limits. It stores `name`, `plan` (the plan's name), `billing_customer_id` (the billing provider's id for it, empty on self-hosted deployments, where nothing bills) and `created_at`. `organizations._id` and `organization_members.organization_id` are `primitive.ObjectID`s, like project ids, and every `Models` method takes one; RPC arguments carry them as hex strings.
+
+An `OrganizationMember` is a user's membership: `organization_id`, `user_id` (the GitHub user ID, the key of `users`) and `role`, one of `owner`, `admin` (`RoleAdmin`) or `member` (`ValidOrganizationRole`). Organizations came after user IDs, so unlike project memberships none is login-only: lookups go by `user_id` alone. `github_login` is the login the member was added under, kept for display; `GetOrganizationMembers` lists a member who has signed in under the login of their last sign-in, read from `users`. `EnsureOrganizationIndexes` creates the unique `(organization_id, user_id)` index (`unique_organization_member`), one membership per user per organization, and a `user_id` index for `GetOrganizationsForUser`.
+
+- `CreateOrganizationWithOwner` inserts an organization and its first owner's membership in one transaction; it refuses one without a name or a plan (`ErrInvalidOrganization`) or an owner (`ErrInvalidUser`). `RenameOrganization` changes the name alone.
+- `RemoveOrganizationMember` and `UpdateOrganizationMemberRole` take the membership's own `_id` and run in a transaction that writes to the organization's document first, as `changeMembers` does for projects (both go through `changeMembersOf`), so two concurrent changes can never leave an organization without an owner: the loser gets `ErrLastOrganizationOwner`. An admin is not an owner, and does not count as one. Both take the role of whoever makes the change (`actorRole`), and refuse anyone but an owner a change that removes, demotes or promotes an owner (`ErrOwnerRequired`), deciding on the member's role as read in the transaction.
+- `GetOrganizationUsage(ctx, orgID)` counts the organization's projects and members (`OrganizationUsage`), what its plan limits; events are not counted yet.
+- `ProjectPlan(ctx, projectID)` is the name of the plan of the project's organization, which the hosted edition's `limits.Provider` resolves the project's limits from; `ErrUnknownOrganization` for a project in no organization, or in one that does not exist.
+- `OrganizationRole(orgID, userID)` is the user's role, `""` for a non-member or a missing organization; `OrganizationExists` tells the two apart. `GetOrganizationsForUser` lists the user's organizations with their role in each (`UserOrganization`).
+
+Project roles stay what each project's memberships say. Organization roles do not carry into projects, except one: an organization owner is owner of every project in the organization. `EffectiveProjectRole(projectRole, orgRole)` is that rule. `AccessToProject(projectID, userID, login)` applies it for the logger's `ProjectAccess`: whether the project exists and the caller's role in it, from their own membership, or owner when they own its organization. `GetProjectsForUser` lists the projects of the organizations the user owns as well, as owner.
+
+Every project belongs to an organization. The deployment has one the startup migration creates, `Default` (`DefaultOrganizationName`, on `SelfHostedPlan`), found by its `Default` flag, which a partial unique index (`unique_default`, from `EnsureOrganizationIndexes`) allows on one organization only; `GetDefaultOrganization` returns it. Its owners can include logins nobody has signed in under yet, which no membership can name, so those are kept on the organization as `pending_owners`. `ClaimPendingOwnerships(githubID, login)` runs at each sign-in, like `LinkMemberships`: it makes the user an owner of each organization waiting for their login (promoting a member), and takes the login off the list, in a transaction serialized with the organization's other member changes. A `pending_owners` index serves the lookup.
+
 ### Startup migration (`migrate.go`)
 
-Adopts data written before projects existed. Logger calls it on every start; Broker and Listener never do.
+Adopts data written before projects existed, and projects created before organizations. Logger calls it on every start; Broker and Listener never do.
 
 The owner memberships it writes for `Default` carry a login alone: Logger has no GitHub token, so it cannot tell which account a configured login is. `LinkMemberships` links each at that user's first sign-in. `ensureOwners` only matches memberships not linked yet; it skips a login a linked membership still stores rather than promote it or add a second row next to it.
 
@@ -105,6 +124,7 @@ The owner memberships it writes for `Default` carry a login alone: Logger has no
 | `CountOrphanedDocuments`         | Counts `logs`, `api_keys`, and `settings` documents with no project ID                  |
 | `MigrateOrphansToDefaultProject` | Adopts those documents into the `Default` project, creating it and its owners if needed |
 | `EnsureDefaultProjectOwners`     | Gives an ownerless `Default` project its owners, promoting existing members if listed   |
+| `EnsureDefaultOrganization`      | Creates the `Default` organization, owned by `Default`'s owners, and moves every project without an organization into it |
 | `NormalizeMemberLogins`          | Lowercases stored member logins, merging case-only duplicates into the higher role      |
 | `DropLegacyTTLIndex`             | Removes the global TTL index that predates per-project retention                        |
 | `ParseGithubLogins`              | Splits a comma-separated allowlist into normalized logins (deduplicated ignoring case)  |
@@ -112,6 +132,8 @@ The owner memberships it writes for `Default` carry a login alone: Logger has no
 `MigrateOrphansToDefaultProject` returns a nil `*MigrationReport` when there is nothing to adopt, which is what makes repeated runs a no-op.
 
 That is also why it can't be trusted to add owners on its own. If its owner step fails, or runs with an empty owner list, the next start has no orphans left and returns early. `EnsureDefaultProjectOwners` runs independently of the orphan count and only acts while `Default` has no owner. It returns a nil `*OwnerRepair` when there is no `Default` project or it already has an owner.
+
+`EnsureDefaultOrganization` runs after it, on every start, fresh installs included, so a first project always has an organization to be created in. It creates the `Default` organization with its owners in one transaction: the `Default` project's owners, as owner members where they are linked to a user ID and as pending owners where they are login-only; or, with no `Default` project or no owner on it, the configured logins, pending. An organization left with neither an owner nor a pending one is given them on a later start, as `EnsureDefaultProjectOwners` does. Then it sets the organization on every project without an `organization_id`. Its `*OrganizationReport` says whether it created the organization, how many owners and pending owners it gave it, how many projects it moved, and whether it is left `Ownerless`.
 
 ## `event` package
 
@@ -126,9 +148,18 @@ Declares the RabbitMQ topology used by all services:
 
 ## `limits` package
 
-`Provider` is the extension point between self-hosted and hosted Logwolf: it answers "may this project ingest `n` more events?" (`AllowIngest`) and "which retention values may it pick?" (`RetentionChoices`). Project ids are hex strings, as services pass them to each other. Every retention choice must be one of `data.ValidRetentionDays`, the only values the logger stores.
+`Provider` is the extension point between self-hosted and hosted Logwolf: it answers "which plan's limits apply to this project?" (`Plan`), "may this project ingest `n` more events?" (`AllowIngest`), "which retention values may it pick?" (`RetentionChoices`), "what plan is an organization that stores this plan name on?" (`OrganizationPlan`) and "what plan does a new organization start on?" (`NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted). Self-hosted answers `OrganizationPlan` with its one plan whatever the name; hosted, a name not in the table is an error. Project ids are hex strings, as services pass them to each other. Every retention choice must be one of `data.ValidRetentionDays`, the only values the logger stores.
 
-`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which allows any ingest and offers every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` has no provider in this build yet and, like any unknown name, is an error, so a hosted deployment never runs on self-hosted limits by accident. The Broker asks it for retention choices; the ingest check has no caller yet.
+Plans live in code (`plans.go`), not in the database: an organization stores only its plan's name (`organizations.plan`), and `PlanByName` turns that into a `Plan`: `MonthlyEvents`, `MaxRetentionDays`, `MaxProjects` and `MaxMembers`, where `Unlimited` (0) sets no limit, and for retention allows forever. A plan's `RetentionChoices` are every supported value up to its maximum, in the dashboard's order, forever first and only when there is no maximum.
+
+| Plan         | Monthly events | Max retention | Max projects | Max members |
+| ------------ | -------------- | ------------- | ------------ | ----------- |
+| `selfhosted` | unlimited      | forever       | unlimited    | unlimited   |
+| `free`       | 100,000        | 30 days       | 3            | 3           |
+| `pro`        | 5,000,000      | 90 days       | 20           | 20          |
+| `team`       | 25,000,000     | 365 days      | unlimited    | unlimited   |
+
+`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which puts every project on the one `selfhosted` plan without looking anything up: any ingest, and every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` is `Organizations`, which resolves a project's plan through a `PlanLookup` the service supplies (the Broker's asks the logger, `RPCServer.ProjectPlan`). A plan name not in the table is an error, never a plan without limits, and so is `cloud` without a lookup, or any unknown edition, so a hosted deployment never runs on self-hosted limits by accident. Events are not counted yet, so `Organizations.AllowIngest` allows them all. The Broker asks the provider for retention choices; the ingest check has no caller yet.
 
 ## `rabbitmq` package
 

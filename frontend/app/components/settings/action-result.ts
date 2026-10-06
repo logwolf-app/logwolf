@@ -2,8 +2,9 @@ import { useEffect } from 'react';
 import { toast } from 'sonner';
 
 /**
- * Every intent on the project settings action answers with the same shape, so
- * each section can type its own fetcher without importing the route module.
+ * Every intent on the project and organization settings actions answers with
+ * the same shape, so each section can type its own fetcher without importing
+ * the route module.
  */
 export type SettingsActionResult = { error?: string; success?: string; warning?: string } | null;
 

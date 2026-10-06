@@ -44,6 +44,18 @@ func setupProjectModels(t *testing.T) data.Models {
 	return m
 }
 
+// testOrganization creates an organization for a test's projects to be created
+// in: every project belongs to one.
+func testOrganization(t *testing.T, m data.Models) primitive.ObjectID {
+	t.Helper()
+
+	org, err := m.CreateOrganizationWithOwner(data.Organization{Name: "Projects", Plan: "free"}, testUserID("org-owner"), "org-owner")
+	if err != nil {
+		t.Fatalf("testOrganization: %v", err)
+	}
+	return org.ID
+}
+
 // --- Project CRUD ---
 
 func TestInsertAndGetProject(t *testing.T) {
@@ -79,12 +91,13 @@ func TestGetProject_NotFound(t *testing.T) {
 // must both succeed, and neither learns that the other's project exists.
 func TestProjectSlugsAreNotUnique(t *testing.T) {
 	m := setupProjectModels(t)
+	org := testOrganization(t, m)
 
-	first, err := m.CreateProjectWithOwner(data.Project{Name: "App", Slug: "app"}, testUserID("alice"), "alice")
+	first, err := m.CreateProjectWithOwner(data.Project{Name: "App", Slug: "app", OrganizationID: org}, testUserID("alice"), "alice")
 	if err != nil {
 		t.Fatalf("first CreateProjectWithOwner: %v", err)
 	}
-	second, err := m.CreateProjectWithOwner(data.Project{Name: "App", Slug: "app"}, testUserID("bob"), "bob")
+	second, err := m.CreateProjectWithOwner(data.Project{Name: "App", Slug: "app", OrganizationID: org}, testUserID("bob"), "bob")
 	if err != nil {
 		t.Fatalf("second CreateProjectWithOwner with the same slug: %v", err)
 	}
@@ -94,7 +107,7 @@ func TestProjectSlugsAreNotUnique(t *testing.T) {
 
 	// Default is an ordinary slug too: the migration's project is found by its
 	// flag, never by this.
-	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Default", Slug: data.DefaultProjectSlug}, testUserID("carol"), "carol"); err != nil {
+	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Default", Slug: data.DefaultProjectSlug, OrganizationID: org}, testUserID("carol"), "carol"); err != nil {
 		t.Errorf("CreateProjectWithOwner with slug %q: %v", data.DefaultProjectSlug, err)
 	}
 }
@@ -133,8 +146,9 @@ func TestRenameProject_NotFound(t *testing.T) {
 
 func TestCreateProjectWithOwner(t *testing.T) {
 	m := setupProjectModels(t)
+	org := testOrganization(t, m)
 
-	p, err := m.CreateProjectWithOwner(data.Project{Name: "Fresh", Slug: "fresh"}, 583231, "  JDoe ")
+	p, err := m.CreateProjectWithOwner(data.Project{Name: "Fresh", Slug: "fresh", OrganizationID: org}, 583231, "  JDoe ")
 	if err != nil {
 		t.Fatalf("CreateProjectWithOwner: %v", err)
 	}
@@ -143,8 +157,8 @@ func TestCreateProjectWithOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProject: %v", err)
 	}
-	if got.Name != "Fresh" || got.Slug != "fresh" || got.Default {
-		t.Errorf("GetProject: got %+v", got)
+	if got.Name != "Fresh" || got.Slug != "fresh" || got.Default || got.OrganizationID != org {
+		t.Errorf("GetProject: got %+v, want it in organization %s", got, org.Hex())
 	}
 
 	members, err := m.GetProjectMembers(p.ID)
@@ -159,15 +173,36 @@ func TestCreateProjectWithOwner(t *testing.T) {
 func TestCreateProjectWithOwner_RequiresOwner(t *testing.T) {
 	m := setupProjectModels(t)
 	db := testMongo(t, sharedModelsMongo(t)).Database("logs")
+	org := testOrganization(t, m)
 
-	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Ownerless", Slug: "ownerless"}, 583231, " "); err == nil {
+	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Ownerless", Slug: "ownerless", OrganizationID: org}, 583231, " "); err == nil {
 		t.Fatal("CreateProjectWithOwner with a blank login: want an error, got nil")
 	}
-	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Ownerless", Slug: "ownerless"}, 0, "jdoe"); err == nil {
+	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Ownerless", Slug: "ownerless", OrganizationID: org}, 0, "jdoe"); err == nil {
 		t.Fatal("CreateProjectWithOwner without a user ID: want an error, got nil")
 	}
 	if n := countDocs(t, db.Collection("projects"), bson.M{}); n != 0 {
 		t.Errorf("projects: %d created without an owner, want 0", n)
+	}
+}
+
+// Every project is created inside an organization, and one that exists.
+func TestCreateProjectWithOwner_RequiresOrganization(t *testing.T) {
+	m := setupProjectModels(t)
+	db := testMongo(t, sharedModelsMongo(t)).Database("logs")
+
+	if _, err := m.CreateProjectWithOwner(data.Project{Name: "Loose", Slug: "loose"}, 583231, "jdoe"); err == nil {
+		t.Fatal("CreateProjectWithOwner without an organization: want an error, got nil")
+	}
+	_, err := m.CreateProjectWithOwner(data.Project{Name: "Lost", Slug: "lost", OrganizationID: newOID()}, 583231, "jdoe")
+	if !errors.Is(err, data.ErrUnknownOrganization) {
+		t.Fatalf("CreateProjectWithOwner in a missing organization: want ErrUnknownOrganization, got %v", err)
+	}
+	if n := countDocs(t, db.Collection("projects"), bson.M{}); n != 0 {
+		t.Errorf("projects: %d created outside an organization, want 0", n)
+	}
+	if n := countDocs(t, db.Collection("project_members"), bson.M{}); n != 0 {
+		t.Errorf("project_members: %d left behind, want 0", n)
 	}
 }
 
@@ -178,12 +213,13 @@ func TestCreateProjectWithOwner_RollsBackWhenOwnerInsertFails(t *testing.T) {
 	m := setupProjectModels(t)
 	client := testMongo(t, sharedModelsMongo(t))
 	db := client.Database("logs")
+	org := testOrganization(t, m)
 
 	// Let the project insert through, then fail every insert after with a
 	// non-transient error, so WithTransaction gives up instead of retrying.
 	setFailPoint(t, client, bson.M{"skip": 1}, bson.M{"failCommands": bson.A{"insert"}, "errorCode": 2})
 
-	_, err := m.CreateProjectWithOwner(data.Project{Name: "Orphan", Slug: "orphan"}, testUserID("alice"), "alice")
+	_, err := m.CreateProjectWithOwner(data.Project{Name: "Orphan", Slug: "orphan", OrganizationID: org}, testUserID("alice"), "alice")
 	clearFailPoint(t, client)
 
 	if err == nil || !strings.Contains(err.Error(), "owner") {

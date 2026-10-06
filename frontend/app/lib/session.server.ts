@@ -13,6 +13,7 @@ type SessionData = {
 	};
 	csrfToken: string;
 	currentProjectID: string;
+	currentOrganizationID: string;
 	/** The user's GitHub OAuth token, sealed (see token.server). */
 	githubToken: string;
 };
@@ -38,6 +39,16 @@ export const { getSession, commitSession, destroySession } = sessionStorage;
 export async function getCurrentProjectID(request: Request): Promise<string | undefined> {
 	const session = await getSession(request.headers.get('Cookie'));
 	return session.get('currentProjectID');
+}
+
+/**
+ * Reads the organization the user is currently working in. Undefined means the
+ * user is a member of no organization — the layout loader keeps the id to one
+ * they still belong to, like the project's.
+ */
+export async function getCurrentOrganizationID(request: Request): Promise<string | undefined> {
+	const session = await getSession(request.headers.get('Cookie'));
+	return session.get('currentOrganizationID');
 }
 
 /**

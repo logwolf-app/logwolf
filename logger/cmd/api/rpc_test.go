@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -176,6 +177,10 @@ func TestProjectScopedMethods_MalformedProjectID(t *testing.T) {
 			var reply string
 			return srv.RevokeAPIKey(&data.RPCRevokeAPIKeyArgs{ProjectID: bad, ID: primitive.NewObjectID().Hex()}, &reply)
 		},
+		"ProjectPlan": func() error {
+			var reply string
+			return srv.ProjectPlan(&data.RPCProjectIDArgs{ID: bad}, &reply)
+		},
 	} {
 		err := call()
 		if err == nil || !strings.Contains(err.Error(), "not a valid ObjectID") {
@@ -199,6 +204,19 @@ func TestCreateProject_RequiresOwner(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "owner is required") {
 			t.Errorf("CreateProject with owner %+v: want \"owner is required\", got %v", owner, err)
 		}
+	}
+}
+
+// TestCreateProject_MalformedOrganizationID: an organization id that is not an
+// ObjectID names no organization, and the error says so in the words the
+// broker reads as a 404.
+func TestCreateProject_MalformedOrganizationID(t *testing.T) {
+	srv := &RPCServer{} // zero-value models: reaching MongoDB would panic
+
+	var reply data.Project
+	err := srv.CreateProject(&data.RPCCreateProjectArgs{Name: "App", Slug: "app", OwnerID: 583231, Owner: "octocat", OrganizationID: "not-an-id"}, &reply)
+	if err == nil || !strings.Contains(err.Error(), "invalid organization ID") || !strings.Contains(err.Error(), "not a valid ObjectID") {
+		t.Errorf("CreateProject in a malformed organization: want \"invalid organization ID\", got %v", err)
 	}
 }
 
@@ -284,5 +302,111 @@ func TestUserMethods_RefuseAnUnkeyedUser(t *testing.T) {
 	}
 	if reply.Found {
 		t.Errorf("GetUser without an id should not find anyone, got %+v", reply)
+	}
+}
+
+// TestOrganizationMethods_MalformedID checks that every method taking an
+// organization id refuses one that is not an ObjectID before touching the
+// database, and says which id it was, for the broker to answer with 404.
+func TestOrganizationMethods_MalformedID(t *testing.T) {
+	srv := &RPCServer{} // zero-value models: reaching MongoDB would panic
+	const bad = "not-an-organization"
+	member := primitive.NewObjectID().Hex()
+
+	for name, call := range map[string]func() error{
+		"GetOrganization": func() error {
+			var reply data.Organization
+			return srv.GetOrganization(&data.RPCOrganizationIDArgs{ID: bad}, &reply)
+		},
+		"UpdateOrganization": func() error {
+			var reply data.Organization
+			return srv.UpdateOrganization(&data.RPCUpdateOrganizationArgs{ID: bad, Name: "Acme"}, &reply)
+		},
+		"OrganizationAccess": func() error {
+			var reply data.OrganizationAccess
+			return srv.OrganizationAccess(&data.RPCOrganizationAccessArgs{OrganizationID: bad, UserID: 583231}, &reply)
+		},
+		"ListOrganizationMembers": func() error {
+			var reply []data.OrganizationMember
+			return srv.ListOrganizationMembers(&data.RPCOrganizationIDArgs{ID: bad}, &reply)
+		},
+		"OrganizationUsage": func() error {
+			var reply data.OrganizationUsage
+			return srv.OrganizationUsage(&data.RPCOrganizationIDArgs{ID: bad}, &reply)
+		},
+		"AddOrganizationMember": func() error {
+			var reply string
+			return srv.AddOrganizationMember(&data.RPCAddOrganizationMemberArgs{
+				OrganizationID: bad, UserID: 583231, GithubLogin: "octocat", Role: data.RoleMember,
+			}, &reply)
+		},
+		"RemoveOrganizationMember": func() error {
+			var reply string
+			return srv.RemoveOrganizationMember(&data.RPCRemoveOrganizationMemberArgs{OrganizationID: bad, MemberID: member}, &reply)
+		},
+		"UpdateOrganizationMemberRole": func() error {
+			var reply string
+			return srv.UpdateOrganizationMemberRole(&data.RPCUpdateOrganizationMemberRoleArgs{
+				OrganizationID: bad, MemberID: member, Role: data.RoleAdmin,
+			}, &reply)
+		},
+	} {
+		err := call()
+		if err == nil || !strings.Contains(err.Error(), "invalid organization ID") {
+			t.Errorf("%s: want an \"invalid organization ID\" error, got %v", name, err)
+		}
+	}
+}
+
+// TestOrganizationMemberChanges_RefuseBadInput: a membership names its user by
+// GitHub user ID and holds one of the three organization roles; anything else,
+// or a member id that is not an ObjectID, is refused before the database.
+func TestOrganizationMemberChanges_RefuseBadInput(t *testing.T) {
+	srv := &RPCServer{} // zero-value models: reaching MongoDB would panic
+	org := primitive.NewObjectID().Hex()
+
+	var reply string
+	for _, args := range []data.RPCAddOrganizationMemberArgs{
+		{OrganizationID: org, UserID: 0, GithubLogin: "octocat", Role: data.RoleMember},
+		{OrganizationID: org, UserID: 583231, GithubLogin: " ", Role: data.RoleMember},
+	} {
+		if err := srv.AddOrganizationMember(&args, &reply); !errors.Is(err, data.ErrInvalidUser) {
+			t.Errorf("AddOrganizationMember(%+v): want ErrInvalidUser, got %v", args, err)
+		}
+	}
+	if err := srv.AddOrganizationMember(&data.RPCAddOrganizationMemberArgs{
+		OrganizationID: org, UserID: 583231, GithubLogin: "octocat", Role: "viewer",
+	}, &reply); err == nil || !strings.Contains(err.Error(), "invalid role") {
+		t.Errorf("AddOrganizationMember with role viewer: want an invalid role error, got %v", err)
+	}
+	if err := srv.UpdateOrganizationMemberRole(&data.RPCUpdateOrganizationMemberRoleArgs{
+		OrganizationID: org, MemberID: primitive.NewObjectID().Hex(), Role: "viewer",
+	}, &reply); err == nil || !strings.Contains(err.Error(), "invalid role") {
+		t.Errorf("UpdateOrganizationMemberRole to viewer: want an invalid role error, got %v", err)
+	}
+	if err := srv.RemoveOrganizationMember(&data.RPCRemoveOrganizationMemberArgs{OrganizationID: org, MemberID: "octocat"}, &reply); err == nil ||
+		!strings.Contains(err.Error(), "invalid member ID") {
+		t.Errorf("RemoveOrganizationMember with a login for an id: want an invalid member ID error, got %v", err)
+	}
+}
+
+// TestCreateOrganization_RefusesBadInput: an organization needs a name, a plan,
+// and the owner it is created with.
+func TestCreateOrganization_RefusesBadInput(t *testing.T) {
+	srv := &RPCServer{} // zero-value models: reaching MongoDB would panic
+
+	for _, args := range []data.RPCCreateOrganizationArgs{
+		{Plan: "free", OwnerID: 583231, Owner: "octocat"},
+		{Name: "Acme", OwnerID: 583231, Owner: "octocat"},
+		{Name: "Acme", Plan: "free", Owner: "octocat"},
+		{Name: "Acme", Plan: "free", OwnerID: 583231},
+	} {
+		var reply data.Organization
+		if err := srv.CreateOrganization(&args, &reply); err == nil {
+			t.Errorf("CreateOrganization(%+v) succeeded", args)
+		}
+		if !reflect.DeepEqual(reply, data.Organization{}) {
+			t.Errorf("CreateOrganization(%+v): reply should stay empty on error, got %+v", args, reply)
+		}
 	}
 }

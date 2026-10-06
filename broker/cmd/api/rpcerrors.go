@@ -15,10 +15,11 @@ import (
 type rpcErrorKind int
 
 const (
-	rpcErrInternal  rpcErrorKind = iota // not the caller's mistake
-	rpcErrDuplicate                     // a unique index refused the write
-	rpcErrNotFound                      // no document matched, or the id cannot name one
-	rpcErrLastOwner                     // data.ErrLastOwner
+	rpcErrInternal      rpcErrorKind = iota // not the caller's mistake
+	rpcErrDuplicate                         // a unique index refused the write
+	rpcErrNotFound                          // no document matched, or the id cannot name one
+	rpcErrLastOwner                         // data.ErrLastOwner or data.ErrLastOrganizationOwner
+	rpcErrOwnerRequired                     // data.ErrOwnerRequired
 )
 
 func classifyRPCError(err error) rpcErrorKind {
@@ -28,19 +29,22 @@ func classifyRPCError(err error) rpcErrorKind {
 		return rpcErrDuplicate
 	// A malformed id is not found either: no document can have it.
 	case strings.Contains(msg, "no documents in result"), strings.Contains(msg, "not a valid ObjectID"),
-		strings.Contains(msg, data.ErrKeyNotFound.Error()):
+		strings.Contains(msg, data.ErrKeyNotFound.Error()), strings.Contains(msg, data.ErrUnknownOrganization.Error()):
 		return rpcErrNotFound
-	case strings.Contains(msg, data.ErrLastOwner.Error()):
+	case strings.Contains(msg, data.ErrLastOwner.Error()), strings.Contains(msg, data.ErrLastOrganizationOwner.Error()):
 		return rpcErrLastOwner
+	case strings.Contains(msg, data.ErrOwnerRequired.Error()):
+		return rpcErrOwnerRequired
 	}
 	return rpcErrInternal
 }
 
 var rpcErrorStatus = map[rpcErrorKind]int{
-	rpcErrInternal:  http.StatusInternalServerError,
-	rpcErrDuplicate: http.StatusConflict,
-	rpcErrNotFound:  http.StatusNotFound,
-	rpcErrLastOwner: http.StatusBadRequest,
+	rpcErrInternal:      http.StatusInternalServerError,
+	rpcErrDuplicate:     http.StatusConflict,
+	rpcErrNotFound:      http.StatusNotFound,
+	rpcErrLastOwner:     http.StatusBadRequest,
+	rpcErrOwnerRequired: http.StatusForbidden,
 }
 
 // rpcErrorMessages says what to tell the caller for each kind of mistake a
@@ -51,6 +55,10 @@ type rpcErrorMessages map[rpcErrorKind]string
 // projectNotFound covers the membership checks, whose only client mistake is a
 // project id that names nothing.
 var projectNotFound = rpcErrorMessages{rpcErrNotFound: "project not found"}
+
+// organizationNotFound covers the organization access check, whose only client
+// mistake is an organization id that names nothing.
+var organizationNotFound = rpcErrorMessages{rpcErrNotFound: "organization not found"}
 
 // logNotFound covers a log id that names nothing in the project, including one
 // that belongs to another project.

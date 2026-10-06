@@ -4,20 +4,12 @@ import { eventContext } from '~/context';
 import { createApi } from '~/lib/api';
 import { requireAuth } from '~/lib/auth.server';
 import { validateCsrfToken } from '~/lib/csrf.server';
+import { safeRedirect } from '~/lib/redirect';
 import { commitSession, getSession } from '~/lib/session.server';
 
 import type { Route } from './+types';
 
 const FALLBACK_REDIRECT = '/dashboard';
-
-/**
- * Keeps the caller-supplied redirect target on this origin — an absolute URL or
- * a protocol-relative path would turn the switcher into an open redirect.
- */
-function safeRedirect(to: string | undefined): string {
-	if (!to?.startsWith('/') || to.startsWith('//') || to.startsWith('/\\')) return FALLBACK_REDIRECT;
-	return to;
-}
 
 export async function action({ request, context }: Route.ActionArgs) {
 	const event = context.get(eventContext);
@@ -29,7 +21,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 	await validateCsrfToken(request, fd);
 
 	const projectId = fd.get('projectId')?.toString() ?? '';
-	const redirectTo = safeRedirect(fd.get('redirectTo')?.toString());
+	const redirectTo = safeRedirect(fd.get('redirectTo')?.toString(), FALLBACK_REDIRECT);
 	event?.set('projectId', projectId);
 
 	// The id comes from the browser, so membership is re-checked here. A project
@@ -37,8 +29,9 @@ export async function action({ request, context }: Route.ActionArgs) {
 	// leaves the session alone; the layout loader re-points it on the way back.
 	const api = createApi(user);
 	const projects = await api.getProjects();
+	const project = projects.find((p) => p.id === projectId);
 
-	if (!projects.some((p) => p.id === projectId)) {
+	if (!project) {
 		event?.setSeverity('warning');
 		event?.set('switchRejected', 'not a member');
 		return redirect(redirectTo);
@@ -46,6 +39,16 @@ export async function action({ request, context }: Route.ActionArgs) {
 
 	const session = await getSession(request.headers.get('Cookie'));
 	session.set('currentProjectID', projectId);
+
+	// Opening a project of another of the user's organizations (the projects
+	// page lists them all) moves them into that organization. A project shared
+	// from one they are not in leaves the organization as it is.
+	if (project.organization_id && project.organization_id !== session.get('currentOrganizationID')) {
+		const organizations = await api.getOrganizations();
+		if (organizations.some((o) => o.id === project.organization_id)) {
+			session.set('currentOrganizationID', project.organization_id);
+		}
+	}
 
 	return redirect(redirectTo, { headers: { 'Set-Cookie': await commitSession(session) } });
 }

@@ -45,8 +45,9 @@ func main() {
 		log.Panic(err)
 	}
 
-	// LOGWOLF_EDITION, self-hosted unless set otherwise.
-	lim, err := limits.FromEnv()
+	// LOGWOLF_EDITION, self-hosted unless set otherwise. The hosted edition
+	// asks the logger for each project's plan.
+	lim, err := limits.FromEnv(projectPlan)
 	if err != nil {
 		log.Panic(err)
 	}

@@ -42,11 +42,17 @@ var slugRe = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 // of different users may share one, so creating a project never tells anyone
 // that another user's project exists. The Default project that holds
 // pre-multi-tenancy data is found by its Default flag instead.
+//
+// OrganizationID is the organization the project belongs to. Every project is
+// created inside one (CreateProjectWithOwner); those stored before
+// organizations existed are moved into the Default organization by the startup
+// migration (EnsureDefaultOrganization), and have none until then.
 type Project struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Name      string             `bson:"name" json:"name"`
-	Slug      string             `bson:"slug" json:"slug"`
-	CreatedAt time.Time          `bson:"created_at" json:"created_at"`
+	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
+	Name           string             `bson:"name" json:"name"`
+	Slug           string             `bson:"slug" json:"slug"`
+	OrganizationID primitive.ObjectID `bson:"organization_id,omitempty" json:"organization_id,omitempty"`
+	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
 	// Default marks the project the startup migration adopts project-less data
 	// into. At most one project has it; see EnsureProjectIndexes.
 	Default bool `bson:"default,omitempty" json:"-"`
@@ -81,12 +87,15 @@ type UserProject struct {
 
 // RPCCreateProjectArgs is the RPC argument for CreateProject. OwnerID and Owner
 // are the GitHub user ID and login of the user who gets the owner membership,
-// created with the project in one transaction.
+// created with the project in one transaction. OrganizationID is the
+// organization to create it in, as hex; empty, the deployment's Default
+// organization.
 type RPCCreateProjectArgs struct {
-	Name    string
-	Slug    string
-	OwnerID int64
-	Owner   string
+	Name           string
+	Slug           string
+	OwnerID        int64
+	Owner          string
+	OrganizationID string
 }
 
 // RPCProjectIDArgs is the RPC argument for calls that take only a project ID.
@@ -205,6 +214,15 @@ func (m *Models) EnsureProjectIndexes() error {
 			SetPartialFilterExpression(bson.M{"default": true}),
 	}); err != nil {
 		return fmt.Errorf("EnsureProjectIndexes projects.default: %w", err)
+	}
+
+	// An organization's projects are looked up by it, as are the projects the
+	// startup migration has yet to put in one.
+	if _, err := projects.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "organization_id", Value: 1}},
+		Options: options.Index().SetName("project_organization_id"),
+	}); err != nil {
+		return fmt.Errorf("EnsureProjectIndexes projects.organization_id: %w", err)
 	}
 
 	members := m.client.Database("logs").Collection("project_members")
@@ -391,6 +409,9 @@ func (m *Models) InsertProject(p Project) (*Project, error) {
 // with this GitHub user ID and login in one transaction. Only an owner can add
 // members, so a project that exists without one is unreachable for good; here
 // either both documents are written or neither is.
+//
+// The project is created inside the organization p.OrganizationID, which must
+// exist: ErrUnknownOrganization otherwise.
 func (m *Models) CreateProjectWithOwner(p Project, userID int64, login string) (*Project, error) {
 	login = NormalizeGithubLogin(login)
 	if userID <= 0 {
@@ -398,6 +419,9 @@ func (m *Models) CreateProjectWithOwner(p Project, userID int64, login string) (
 	}
 	if login == "" {
 		return nil, errors.New("CreateProjectWithOwner: owner login is required")
+	}
+	if p.OrganizationID.IsZero() {
+		return nil, errors.New("CreateProjectWithOwner: organization is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -424,6 +448,13 @@ func (m *Models) CreateProjectWithOwner(p Project, userID int64, login string) (
 	// writes the same two documents again rather than a second project.
 	db := m.client.Database("logs")
 	_, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (any, error) {
+		exists, err := m.OrganizationExists(sc, p.OrganizationID)
+		if err != nil {
+			return nil, fmt.Errorf("CreateProjectWithOwner: %w", err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("CreateProjectWithOwner: %w: %s", ErrUnknownOrganization, p.OrganizationID.Hex())
+		}
 		if _, err := db.Collection("projects").InsertOne(sc, p); err != nil {
 			return nil, fmt.Errorf("CreateProjectWithOwner project: %w", err)
 		}
@@ -498,24 +529,9 @@ func (m *Models) GetProjectMembers(projectID primitive.ObjectID) ([]ProjectMembe
 			userIDs = append(userIDs, mb.UserID)
 		}
 	}
-	if len(userIDs) == 0 {
-		return members, nil
-	}
-
-	userCursor, err := m.users().Find(ctx, bson.M{"github_id": bson.M{"$in": userIDs}},
-		options.Find().SetProjection(bson.M{"github_id": 1, "github_login": 1}))
+	logins, err := m.currentLogins(ctx, userIDs)
 	if err != nil {
-		return nil, fmt.Errorf("GetProjectMembers users: %w", err)
-	}
-	defer userCursor.Close(ctx)
-
-	var users []User
-	if err := userCursor.All(ctx, &users); err != nil {
-		return nil, fmt.Errorf("GetProjectMembers users decode: %w", err)
-	}
-	logins := make(map[int64]string, len(users))
-	for _, u := range users {
-		logins[u.GithubID] = u.GithubLogin
+		return nil, fmt.Errorf("GetProjectMembers: %w", err)
 	}
 	for i, mb := range members {
 		if login := logins[mb.UserID]; login != "" {
@@ -523,6 +539,31 @@ func (m *Models) GetProjectMembers(projectID primitive.ObjectID) ([]ProjectMembe
 		}
 	}
 	return members, nil
+}
+
+// currentLogins returns the login each of these users signed in under last,
+// keyed by GitHub user ID. A user who has never signed in is missing from it.
+func (m *Models) currentLogins(ctx context.Context, userIDs []int64) (map[int64]string, error) {
+	logins := map[int64]string{}
+	if len(userIDs) == 0 {
+		return logins, nil
+	}
+
+	cursor, err := m.users().Find(ctx, bson.M{"github_id": bson.M{"$in": userIDs}},
+		options.Find().SetProjection(bson.M{"github_id": 1, "github_login": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("users: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var users []User
+	if err := cursor.All(ctx, &users); err != nil {
+		return nil, fmt.Errorf("users decode: %w", err)
+	}
+	for _, u := range users {
+		logins[u.GithubID] = u.GithubLogin
+	}
+	return logins, nil
 }
 
 // RenameProject changes a project's name. Its slug stays what it was when the
@@ -650,15 +691,22 @@ func (m *Models) UpdateProjectMemberRole(projectID, memberID primitive.ObjectID,
 }
 
 // changeMembers runs fn, a change to a project's members that must never leave
-// it without an owner, in one transaction.
+// it without an owner, in one transaction. See changeMembersOf.
+func (m *Models) changeMembers(op string, projectID primitive.ObjectID, fn func(sc mongo.SessionContext, coll *mongo.Collection) error) error {
+	return m.changeMembersOf(op, "projects", "project_members", projectID, fn)
+}
+
+// changeMembersOf runs fn, a change to the members of the document parentID in
+// the parents collection that must never leave it without an owner, in one
+// transaction. fn gets the members collection.
 //
 // A transaction alone is not enough: two requests removing or demoting two
 // different owners would each read two owners from their own snapshot, write
-// different documents, never conflict, and leave the project with none. So the
-// transaction first writes to the project's own document. The second one to get
+// different documents, never conflict, and leave the parent with none. So the
+// transaction first writes to the parent's own document. The second one to get
 // there hits a write conflict, WithTransaction retries it, and the retry counts
 // the owners after the first change has committed.
-func (m *Models) changeMembers(op string, projectID primitive.ObjectID, fn func(sc mongo.SessionContext, coll *mongo.Collection) error) error {
+func (m *Models) changeMembersOf(op, parents, members string, parentID primitive.ObjectID, fn func(sc mongo.SessionContext, coll *mongo.Collection) error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -671,15 +719,15 @@ func (m *Models) changeMembers(op string, projectID primitive.ObjectID, fn func(
 	db := m.client.Database("logs")
 
 	_, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (any, error) {
-		// A membership row can outlive its project; with no project document to
+		// A membership row can outlive its parent; with no parent document to
 		// write to there is nothing to serialize on, and no owner left to protect.
-		if _, err := db.Collection("projects").UpdateOne(sc,
-			bson.M{"_id": projectID},
+		if _, err := db.Collection(parents).UpdateOne(sc,
+			bson.M{"_id": parentID},
 			bson.M{"$currentDate": bson.M{"members_updated_at": true}},
 		); err != nil {
-			return nil, fmt.Errorf("%s lock project: %w", op, err)
+			return nil, fmt.Errorf("%s lock %s: %w", op, parents, err)
 		}
-		return nil, fn(sc, db.Collection("project_members"))
+		return nil, fn(sc, db.Collection(members))
 	})
 	return err
 }
@@ -688,12 +736,23 @@ func (m *Models) changeMembers(op string, projectID primitive.ObjectID, fn func(
 // the one about to be removed or demoted. The count is only safe from concurrent
 // changes inside changeMembers.
 func refuseLastOwner(sc mongo.SessionContext, coll *mongo.Collection, projectID primitive.ObjectID) error {
-	n, err := coll.CountDocuments(sc, bson.M{"project_id": projectID, "role": RoleOwner})
+	return refuseLastOwnerOf(sc, coll, bson.M{"project_id": projectID}, ErrLastOwner)
+}
+
+// refuseLastOwnerOf returns last unless the members matching parent include an
+// owner besides the one about to be removed or demoted. The count is only safe
+// from concurrent changes inside changeMembersOf.
+func refuseLastOwnerOf(sc mongo.SessionContext, coll *mongo.Collection, parent bson.M, last error) error {
+	owners := bson.M{"role": RoleOwner}
+	for k, v := range parent {
+		owners[k] = v
+	}
+	n, err := coll.CountDocuments(sc, owners)
 	if err != nil {
 		return fmt.Errorf("count owners: %w", err)
 	}
 	if n <= 1 {
-		return ErrLastOwner
+		return last
 	}
 	return nil
 }
@@ -736,7 +795,9 @@ func (m *Models) GetAllProjects(ctx context.Context) ([]Project, error) {
 
 // GetProjectsForUser returns every project the user with this GitHub user ID
 // and current login is a member of, each paired with the role they hold in it.
-// Which memberships are theirs is MemberFilter's rule.
+// Which memberships are theirs is MemberFilter's rule. The projects of the
+// organizations they own are theirs too, as owner (EffectiveProjectRole),
+// whatever the projects' own memberships say.
 func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserProject, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -752,7 +813,12 @@ func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserPro
 		return nil, fmt.Errorf("GetProjectsForUser members decode: %w", err)
 	}
 
-	if len(members) == 0 {
+	owned, err := m.ownedOrganizations(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("GetProjectsForUser: %w", err)
+	}
+
+	if len(members) == 0 && len(owned) == 0 {
 		return []UserProject{}, nil
 	}
 
@@ -762,8 +828,16 @@ func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserPro
 		ids[i] = mb.ProjectID
 		roles[mb.ProjectID] = mb.Role
 	}
+	ownedOrg := make(map[primitive.ObjectID]bool, len(owned))
+	for _, id := range owned {
+		ownedOrg[id] = true
+	}
 
-	projectCursor, err := m.client.Database("logs").Collection("projects").Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+	filter := bson.M{"$or": bson.A{
+		bson.M{"_id": bson.M{"$in": ids}},
+		bson.M{"organization_id": bson.M{"$in": owned}},
+	}}
+	projectCursor, err := m.client.Database("logs").Collection("projects").Find(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("GetProjectsForUser projects: %w", err)
 	}
@@ -778,7 +852,11 @@ func (m *Models) GetProjectsForUser(userID int64, githubLogin string) ([]UserPro
 	// row lingers); the projects query is what decides which entries survive.
 	result := make([]UserProject, 0, len(projects))
 	for _, p := range projects {
-		result = append(result, UserProject{Project: p, Role: roles[p.ID]})
+		var orgRole string
+		if ownedOrg[p.OrganizationID] {
+			orgRole = RoleOwner
+		}
+		result = append(result, UserProject{Project: p, Role: EffectiveProjectRole(roles[p.ID], orgRole)})
 	}
 	return result, nil
 }

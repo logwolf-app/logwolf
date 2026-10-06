@@ -1,6 +1,8 @@
 import { Check } from 'lucide-react';
 import { useFetcher } from 'react-router';
 
+import { type SettingsActionResult, useSuccessToast } from '~/components/settings/action-result';
+import { SettingsFooter, SettingsRow } from '~/components/settings/settings-row';
 import { Alert, AlertTitle } from '~/components/ui/alert';
 import { Button } from '~/components/ui/button';
 import { Card } from '~/components/ui/card';
@@ -8,9 +10,6 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from '~/components/ui
 import { Input } from '~/components/ui/input';
 import { useCsrfToken } from '~/hooks/use-csrf-token';
 import type { UserProject } from '~/lib/api';
-
-import { type SettingsActionResult, useSuccessToast } from '../action-result';
-import { SettingsFooter, SettingsRow } from './settings-row';
 
 type Props = { project: UserProject; canEdit: boolean };
 

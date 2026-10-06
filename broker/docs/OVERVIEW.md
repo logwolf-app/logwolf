@@ -17,6 +17,7 @@ cmd/api/
 ├── handlers.go      # Request handlers
 ├── middleware.go    # Auth middleware (Bearer token, internal secret)
 ├── access.go        # Project access: authorizeProject, requireProject
+├── organizations.go # Organization access (requireOrganization) and routes
 ├── clientip.go      # Client address behind trusted proxies (TRUSTED_PROXIES)
 ├── rpcerrors.go     # Maps the logger's RPC errors to HTTP statuses
 └── helpers.go       # JSON read/write utilities
@@ -42,13 +43,13 @@ Both log reads, `GET /logs` and the dashboard's `GET /projects/{id}/logs`, take 
 
 Not reachable from the internet: Caddy forwards only the public routes above and the health checks, and `caddy_test.go` fails if the `Caddyfile` would forward any of these, or stop forwarding a public one.
 
-Everything that acts on one project is under `/projects/{id}`. `PUT /users/me` is the one route about the caller rather than a project.
+Everything that acts on one project is under `/projects/{id}`, and on one organization under `/organizations/{id}`. `PUT /users/me` is the one route about the caller rather than a project or an organization.
 
 | Method   | Path                                | Access | Description                                                 |
 | -------- | ----------------------------------- | ------ | ----------------------------------------------------------- |
 | `PUT`    | `/users/me`                         | —      | Record a sign-in (below)                                    |
 | `GET`    | `/projects`                         | —      | Projects the caller belongs to, with `role`                 |
-| `POST`   | `/projects`                         | —      | Create a project, owned by the caller                       |
+| `POST`   | `/projects`                         | —      | Create a project in the Default organization, caller-owned  |
 | `GET`    | `/projects/{id}`                    | member | Get one project                                             |
 | `PATCH`  | `/projects/{id}`                    | owner  | Rename a project (the slug stays)                           |
 | `DELETE` | `/projects/{id}`                    | owner  | Delete a project and everything under it                    |
@@ -66,6 +67,19 @@ Everything that acts on one project is under `/projects/{id}`. `PUT /users/me` i
 | `GET`    | `/projects/{id}/retention`          | member | Get retention (`{"days": n, "choices": [...]}`)             |
 | `PATCH`  | `/projects/{id}/retention`          | member | Update retention; lowering it is owner-only (below)         |
 | `GET`    | `/projects/{id}/metrics`            | member | Usage analytics                                             |
+
+| Method   | Path                                     | Access | Description                                                        |
+| -------- | ---------------------------------------- | ------ | ------------------------------------------------------------------ |
+| `GET`    | `/organizations`                         | —      | Organizations the caller belongs to, with `role`                   |
+| `POST`   | `/organizations`                         | —      | Create an organization, owned by the caller: `{"name"}`            |
+| `GET`    | `/organizations/{id}`                    | member | Get one organization, with the caller's `role`                     |
+| `PATCH`  | `/organizations/{id}`                    | admin  | Rename an organization (the plan stays)                            |
+| `POST`   | `/organizations/{id}/projects`           | member | Create a project in the organization, owned by the caller          |
+| `GET`    | `/organizations/{id}/plan`               | member | The plan's limits and the organization's usage (below)             |
+| `GET`    | `/organizations/{id}/members`            | member | List members                                                       |
+| `POST`   | `/organizations/{id}/members`            | admin  | Add a member: `{"login", "user_id", "role"}`; an owner, owner-only |
+| `PATCH`  | `/organizations/{id}/members/{memberID}` | admin  | Change a member's `role`; to or from owner, owner-only             |
+| `DELETE` | `/organizations/{id}/members/{memberID}` | admin  | Remove a member; an owner, owner-only                              |
 
 Internal routes also require the signed-in user: `X-User-ID`, their GitHub user
 ID, and `X-User-Login`, their login (401 without either, or with an ID that is
@@ -100,11 +114,24 @@ Every route that acts on a project denies access the same way (`access.go`):
 
 `authorizeProject` is that rule. It costs one logger call, `RPCServer.ProjectAccess`, which answers both whether the project exists and the caller's role. Every `/projects/{id}/...` route gets it from the `requireProject(anyMember|ownerOnly)` middleware, so `routes.go` states each route's access level. The middleware also hands the handler the checked project (with its canonical lower-case id) and the logger connection it checked over, which the handler reuses and the middleware closes. No route takes a project id from the query or the body.
 
-Creating a project is one logger call: the logger writes the project and the
-caller's owner membership in one transaction, so a failure leaves no project
-behind that nobody could reach. Slugs are display labels, fixed at creation and
-not unique, so creating a project never reveals that someone else's has the same
-one.
+The caller's role in a project is their own membership's, except that an owner of the project's organization is owner of the project, member or not (`data.EffectiveProjectRole`; the logger works it out in the same `ProjectAccess` call). `GET /projects` lists those projects too, as owner. The organization's admins and members get nothing from it.
+
+Organization routes deny the same way (`organizations.go`): **404** if the organization does not exist or the id is not an ObjectID, **403** if the caller is not a member or holds a role below the route's. `authorizeOrganization` decides with one `RPCServer.OrganizationAccess` call, by the caller's user ID alone (organization memberships always have one), and `requireOrganization(anyMember|adminOnly|ownerOnly)` declares each route's level in `routes.go`, handing the handler the checked organization, the caller's role and the logger connection. On a project route anything above `anyMember` is owner-only, since projects have no admins. No route takes an organization id from the query or the body.
+
+Admins manage an organization's members, but only owners decide who the owners are: an admin adding an owner is refused with a 403 before the logger is called, and an admin removing, demoting or promoting an owner is refused by the logger (`data.ErrOwnerRequired`, 403), which reads the member's role in the same transaction as the change; the handler passes the caller's role from the access check as `ActorRole`. An organization always keeps one owner, like a project (400).
+
+A new organization starts on the plan the edition picks (`limits.Provider.NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted), never one from the request. `GET /organizations/{id}/plan` answers `{"plan": {"name", "monthly_events", "max_retention_days", "max_projects", "max_members"}, "usage": {"projects", "members"}}`, the plan resolved by the edition from the name the organization stores (`OrganizationPlan`: self-hosted is always the one unlimited plan; hosted, a name not in the table is a 500, never a plan without limits). A limit of 0 is none. Events are not counted yet, so usage has no events.
+
+Creating a project is one logger call, `POST /projects` and
+`POST /organizations/{id}/projects` alike (`{"name", "slug"}`; the second
+names the organization in `RPCCreateProjectArgs.OrganizationID`, the first
+leaves it to the logger's Default organization). Any member of an organization
+may create a project in it: the organization role grants nothing in the
+project, so the creator's owner membership is what lets them in. The logger
+writes the project and the caller's owner membership in one transaction, so a
+failure leaves no project behind that nobody could reach. Slugs are display
+labels, fixed at creation and not unique, so creating a project never reveals
+that someone else's has the same one.
 
 Renaming or deleting a project and adding, removing or changing the role of a
 member are owner-only. A project always keeps one owner: removing or demoting the last one is a 400
@@ -136,13 +163,16 @@ the handler's choosing:
 | Unique index violation (`E11000`)                      | 409    | Adding an existing member                          |
 | No document matched, or the id is not a valid ObjectID | 404    | A malformed project id on any project-scoped route |
 | `data.ErrKeyNotFound`                                  | 404    | Revoking a key that does not exist                 |
-| `data.ErrLastOwner`                                    | 400    | Removing or demoting the last owner                |
+| `data.ErrLastOwner`, `data.ErrLastOrganizationOwner`   | 400    | Removing or demoting the last owner                |
+| `data.ErrOwnerRequired`                                | 403    | An admin removing an organization's owner          |
 | Anything else                                          | 500    | The logger or MongoDB failed                       |
 
 Retention days are checked against the project's choices before the logger is
 called: what the edition's `limits.Provider` offers it (`Config.Limits`; a
 `Config` without one is self-hosted, which offers every one of
-`data.ValidRetentionDays`). Anything else is a 400, and so is a missing `days`,
+`data.ValidRetentionDays`). The hosted edition's offers the retention of the
+plan of the project's organization, which it asks the logger for
+(`projectPlan`, in `plans.go`, over a connection of its own). Anything else is a 400, and so is a missing `days`,
 rather than 0 (keep forever). `GET` and `PATCH` both answer with the choices, so
 the dashboard lists what the project may pick. A provider that fails is a 500.
 

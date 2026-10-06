@@ -7,6 +7,7 @@ import { eventContext } from '~/context';
 import { createApi } from '~/lib/api';
 import { requireAuth } from '~/lib/auth.server';
 import { getOrCreateCsrfToken } from '~/lib/csrf.server';
+import { resolveCurrent } from '~/lib/organizations';
 import { commitSession, getSession } from '~/lib/session.server';
 import { ThemeProvider } from '~/store/theme-provider';
 
@@ -22,18 +23,27 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	const csrfToken = getOrCreateCsrfToken(session);
 
 	const api = createApi(user);
-	const projects = await api.getProjects();
+	const [projects, organizations] = await Promise.all([api.getProjects(), api.getOrganizations()]);
 	const url = new URL(request.url);
 
-	// The stored project is only usable while the user is still a member of it —
-	// a deleted project, or one the user was removed from, falls back to the
-	// first project they can still reach.
+	// The stored organization and project are only usable while the user can
+	// still reach them — a deleted one, or one the user was removed from, falls
+	// back to what they can (resolveCurrent). The project must also be in view
+	// of the organization: its own, or one shared from an organization the user
+	// is not in.
 	const storedProjectID = session.get('currentProjectID');
-	const currentProject = projects.find((p) => p.id === storedProjectID) ?? projects.at(0);
+	const storedOrganizationID = session.get('currentOrganizationID');
+	const {
+		organization: currentOrganization,
+		project: currentProject,
+		inView,
+	} = resolveCurrent({ projects, organizations, storedProjectID, storedOrganizationID });
 
-	if (currentProject?.id !== storedProjectID) {
+	if (currentProject?.id !== storedProjectID || currentOrganization?.id !== storedOrganizationID) {
 		if (currentProject) session.set('currentProjectID', currentProject.id);
 		else session.unset('currentProjectID');
+		if (currentOrganization) session.set('currentOrganizationID', currentOrganization.id);
+		else session.unset('currentOrganizationID');
 
 		// Child loaders of this request already read the stale cookie, so reload
 		// the same URL to let them run against the corrected session.
@@ -43,22 +53,24 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	}
 
 	// Every page under this layout is scoped to a project, so a user who has
-	// none has nothing to render. Creating one is the only way forward, and that
-	// page is the one place reachable without a project in session.
-	if (projects.length === 0 && url.pathname !== '/projects/new') {
+	// none in view has nothing to render. Creating one is the way forward (or
+	// switching organization, which the sidebar there offers), and that page is
+	// the one place reachable without a project in session.
+	if (inView.length === 0 && url.pathname !== '/projects/new') {
 		throw redirect('/projects/new');
 	}
 
 	event?.set('currentProjectID', currentProject?.id ?? null);
+	event?.set('currentOrganizationID', currentOrganization?.id ?? null);
 
 	return data(
-		{ user, csrfToken, projects, currentProject },
+		{ user, csrfToken, projects, currentProject, organizations, currentOrganization },
 		{ headers: { 'Set-Cookie': await commitSession(session) } },
 	);
 }
 
 export default function Layout({ matches, loaderData }: Route.ComponentProps) {
-	const { user, projects, currentProject, csrfToken } = loaderData;
+	const { user, projects, currentProject, organizations, currentOrganization, csrfToken } = loaderData;
 
 	return (
 		<ThemeProvider>
@@ -67,6 +79,8 @@ export default function Layout({ matches, loaderData }: Route.ComponentProps) {
 					matches={matches}
 					projects={projects}
 					currentProject={currentProject}
+					organizations={organizations}
+					currentOrganization={currentOrganization}
 					csrfToken={csrfToken}
 					user={user}
 				/>

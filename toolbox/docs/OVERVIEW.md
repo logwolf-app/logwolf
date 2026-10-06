@@ -17,6 +17,7 @@ toolbox/
 │   ├── project.go   # Project and ProjectMember models, membership queries
 │   ├── organization.go # Organization and OrganizationMember models, membership queries
 │   ├── user.go      # Users, keyed by GitHub user ID
+│   ├── usage.go     # Usage metering: hourly buckets of accepted events, bytes and storage
 │   ├── migrate.go   # Startup migration of pre-multi-tenancy data
 │   └── log.go       # Log entry type aliases
 ├── event/
@@ -103,13 +104,21 @@ An `OrganizationMember` is a user's membership: `organization_id`, `user_id` (th
 
 - `CreateOrganizationWithOwner` inserts an organization and its first owner's membership in one transaction; it refuses one without a name or a plan (`ErrInvalidOrganization`) or an owner (`ErrInvalidUser`). `RenameOrganization` changes the name alone.
 - `RemoveOrganizationMember` and `UpdateOrganizationMemberRole` take the membership's own `_id` and run in a transaction that writes to the organization's document first, as `changeMembers` does for projects (both go through `changeMembersOf`), so two concurrent changes can never leave an organization without an owner: the loser gets `ErrLastOrganizationOwner`. An admin is not an owner, and does not count as one. Both take the role of whoever makes the change (`actorRole`), and refuse anyone but an owner a change that removes, demotes or promotes an owner (`ErrOwnerRequired`), deciding on the member's role as read in the transaction.
-- `GetOrganizationUsage(ctx, orgID)` counts the organization's projects and members (`OrganizationUsage`), what its plan limits; events are not counted yet.
+- `GetOrganizationUsage(ctx, orgID)` counts the organization's projects and members (`OrganizationUsage`), what its plan limits; events are metered per project, in `usage` (below), and not added up per organization yet.
 - `ProjectPlan(ctx, projectID)` is the name of the plan of the project's organization, which the hosted edition's `limits.Provider` resolves the project's limits from; `ErrUnknownOrganization` for a project in no organization, or in one that does not exist.
 - `OrganizationRole(orgID, userID)` is the user's role, `""` for a non-member or a missing organization; `OrganizationExists` tells the two apart. `GetOrganizationsForUser` lists the user's organizations with their role in each (`UserOrganization`).
 
 Project roles stay what each project's memberships say. Organization roles do not carry into projects, except one: an organization owner is owner of every project in the organization. `EffectiveProjectRole(projectRole, orgRole)` is that rule. `AccessToProject(projectID, userID, login)` applies it for the logger's `ProjectAccess`: whether the project exists and the caller's role in it, from their own membership, or owner when they own its organization. `GetProjectsForUser` lists the projects of the organizations the user owns as well, as owner.
 
 Every project belongs to an organization. The deployment has one the startup migration creates, `Default` (`DefaultOrganizationName`, on `SelfHostedPlan`), found by its `Default` flag, which a partial unique index (`unique_default`, from `EnsureOrganizationIndexes`) allows on one organization only; `GetDefaultOrganization` returns it. Its owners can include logins nobody has signed in under yet, which no membership can name, so those are kept on the organization as `pending_owners`. `ClaimPendingOwnerships(githubID, login)` runs at each sign-in, like `LinkMemberships`: it makes the user an owner of each organization waiting for their login (promoting a member), and takes the login off the list, in a transaction serialized with the organization's other member changes. A `pending_owners` index serves the lookup.
+
+### Usage (`usage.go`)
+
+The `usage` collection holds what each project uses, in hourly buckets: one document per `project_id`, `hour` (`UsageHour`: the start of the hour, in UTC) and `source`. `EnsureUsageIndexes` creates the unique `(project_id, hour, source)` index (`usage_project_hour_source`) and a TTL index on `hour` (`usage_hour_ttl`) that expires a bucket `UsageRetention` (400 days) after its hour, whatever the project's log retention.
+
+- `RecordUsage(ctx, source, counts)` stores a Broker run's running totals (`UsageCount`: `events` and `bytes` per project and hour), each bucket keeping the larger of its value and the one sent, so a count sent again, or late, changes nothing. It refuses (`ErrInvalidUsage`) an empty source, the storage job's (`StorageSource`), or a negative count, before any write. Over RPC the counts carry the project as a hex string (`RPCRecordUsageArgs`, `RPCUsageCount`).
+- `MeasureProjectStorage(ctx, projectID)` counts a project's logs and adds up their BSON sizes (`ProjectStorage`); it reads them all, so only the Logger's periodic job calls it. `RecordProjectStorage(ctx, projectID, at, storage)` writes the measure to the hour's `StorageSource` bucket (`stored_events`, `stored_bytes`, `measured_at`), replacing an earlier one of the same hour.
+- `GetProjectUsage(ctx, projectID, from, to)` adds up the events and bytes every Broker run recorded in the hour buckets from `from`'s up to `to`, and takes the last storage measure before `to` (`ProjectUsage`).
 
 ### Startup migration (`migrate.go`)
 

@@ -60,11 +60,13 @@ type fakeLogger struct {
 	removedOrgMembers []data.RPCRemoveOrganizationMemberArgs
 	orgRoleChanges    []data.RPCUpdateOrganizationMemberRoleArgs
 	orgAccessChecks   int // OrganizationAccess calls
+	usageFlushes      []data.RPCRecordUsageArgs
 
 	// Failure injection.
 	failCreateProject bool               // CreateProject fails, as its transaction would, and creates nothing
 	lastOwnerLogin    string             // RemoveMember and UpdateMemberRole refuse to remove or demote this login
 	status            *data.LoggerStatus // what Status answers; nil is ready
+	failRecordUsage   bool               // RecordUsage fails, as an unreachable database would
 
 	// openConns counts the broker's connections the fake has not yet seen
 	// closed. It goes back to zero only if every handler closed its client.
@@ -278,6 +280,19 @@ func (f *fakeLogger) ProjectPlan(args *data.RPCProjectIDArgs, reply *string) err
 		return fmt.Errorf("ProjectPlan: project %s: %w", args.ID, data.ErrUnknownOrganization)
 	}
 	*reply = plan
+	return nil
+}
+
+// RecordUsage records the flush, or fails it when failRecordUsage is set.
+func (f *fakeLogger) RecordUsage(args *data.RPCRecordUsageArgs, reply *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.failRecordUsage {
+		return errors.New("RecordUsage: server selection timeout")
+	}
+	f.usageFlushes = append(f.usageFlushes, *args)
+	*reply = "OK"
 	return nil
 }
 

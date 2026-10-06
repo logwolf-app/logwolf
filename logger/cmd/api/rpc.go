@@ -590,6 +590,34 @@ func (r *RPCServer) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *d
 	return nil
 }
 
+// RecordUsage stores a broker's running totals of the events it accepted, per
+// project and hour (see data.RecordUsage). The totals replace what the broker
+// sent before rather than adding to it, so a retried flush counts nothing twice.
+//
+// A count under a malformed project id is dropped, not refused: the broker
+// counts only projects it has checked, and refusing would have it retry the
+// same count forever. A project that has been deleted keeps its usage.
+func (r *RPCServer) RecordUsage(args *data.RPCRecordUsageArgs, reply *string) error {
+	counts := make([]data.UsageCount, 0, len(args.Counts))
+	for _, c := range args.Counts {
+		id, err := parseProjectID("RecordUsage", c.ProjectID)
+		if err != nil {
+			log.Printf("Dropping usage of %d events from %s: %v", c.Events, args.Source, err)
+			continue
+		}
+		counts = append(counts, data.UsageCount{ProjectID: id, Hour: c.Hour, Events: c.Events, Bytes: c.Bytes})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.models.RecordUsage(ctx, args.Source, counts); err != nil {
+		log.Println("Error recording usage:", err)
+		return err
+	}
+	*reply = "OK"
+	return nil
+}
+
 // AddOrganizationMember adds the user args.UserID to an organization. A user
 // who is a member already is refused with a duplicate key error.
 func (r *RPCServer) AddOrganizationMember(args *data.RPCAddOrganizationMemberArgs, reply *string) error {

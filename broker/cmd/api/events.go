@@ -44,6 +44,11 @@ func eventMessage(p data.JSONLogPayload) (event.Message, error) {
 //
 // Events sent with an API key are then held to the key's rate (limitIngest), a
 // token per event; those the dashboard sends have no key and no rate.
+//
+// Once RabbitMQ has confirmed them, the events are counted against their
+// project's usage, with the size of their queued messages as their bytes (see
+// usageMeter): every event the broker answers 202 for, the dashboard's
+// included, and none it does not.
 func (app *Config) publishEvents(w http.ResponseWriter, r *http.Request, payloads ...data.JSONLogPayload) {
 	msgs := make([]event.Message, len(payloads))
 	for i, p := range payloads {
@@ -81,6 +86,13 @@ func (app *Config) publishEvents(w http.ResponseWriter, r *http.Request, payload
 		app.errorJSON(w, fmt.Errorf("could not queue the events, try again"), http.StatusServiceUnavailable)
 		return
 	}
+
+	// The handlers file every event under the one project of the request.
+	var size int64
+	for _, m := range msgs {
+		size += int64(len(m.Body))
+	}
+	app.Usage.record(payloads[0].ProjectID, int64(len(msgs)), size)
 
 	app.writeJSON(w, http.StatusAccepted, jsonResponse{Error: false, Message: "OK!"})
 }

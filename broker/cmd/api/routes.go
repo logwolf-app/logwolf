@@ -85,6 +85,9 @@ func (app *Config) routes() http.Handler {
 		r.With(app.requireScope(data.ScopeRead)).Get("/logs", app.GetLogs)
 		r.With(app.requireScope(data.ScopeRead)).Get("/logs/{id}", app.GetLog)
 		r.With(app.requireScope(data.ScopeDelete)).Delete("/logs", app.DeleteLog)
+		// The Model Context Protocol, for AI agents: read-only tools over the
+		// key's project (mcp.go).
+		r.With(app.requireScope(data.ScopeRead)).Post("/mcp", app.mcpHandler().ServeHTTP)
 	})
 
 	return mux

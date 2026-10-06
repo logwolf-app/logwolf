@@ -21,7 +21,7 @@ import type { Route } from './+types';
 
 const SCOPE_DESCRIPTIONS: Record<ApiKeyScope, string> = {
 	ingest: 'Send events (POST /logs, POST /logs/batch).',
-	read: 'Read every event in the project (GET /logs).',
+	read: 'Read every event in the project (GET /logs), and let AI agents analyze them over MCP (POST /mcp).',
 	delete: 'Delete events by filter, up to all of them at once (DELETE /logs).',
 };
 

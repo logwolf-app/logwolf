@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"logwolf-toolbox/data"
+	"maps"
 	"mime"
 	"net/http"
 	"os"
@@ -283,6 +284,10 @@ type apiCase struct {
 	scopes []string
 	auth   string
 
+	// headers are set on the request after the defaults, which they replace;
+	// an empty value removes the header.
+	headers map[string]string
+
 	setup func(t *testing.T, app *Config)
 	want  int
 }
@@ -348,6 +353,15 @@ func apiCases() []apiCase {
 	}
 
 	ingest, read, del := []string{data.ScopeIngest}, []string{data.ScopeRead}, []string{data.ScopeDelete}
+
+	// The headers the Streamable HTTP transport demands on every POST.
+	mcpHeaders := map[string]string{"Accept": "application/json, text/event-stream"}
+	with := func(h map[string]string, name, value string) map[string]string {
+		h = maps.Clone(h)
+		h[name] = value
+		return h
+	}
+	toolCall := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_events","arguments":{"severity":["error"],"since":"24h"}}}`
 	event := `{"name":"signup","severity":"info","data":"{\"plan\":\"pro\"}","tags":["web"],"duration":12}`
 	tooMany := "[" + strings.TrimSuffix(strings.Repeat(`{"severity":"info"},`, maxBatchSize+1), ",") + "]"
 
@@ -391,6 +405,17 @@ func apiCases() []apiCase {
 		{name: "queue down", method: "GET", pattern: "/health", setup: queueFails, want: http.StatusServiceUnavailable},
 
 		{name: "running", method: "GET", pattern: "/ping", want: http.StatusOK},
+
+		{name: "initialize", method: "POST", pattern: "/mcp", body: mcpInitialize, headers: mcpHeaders, scopes: read, want: http.StatusOK},
+		{name: "tool call", method: "POST", pattern: "/mcp", body: toolCall, headers: mcpHeaders, scopes: read, want: http.StatusOK},
+		{name: "tool call, logger down", method: "POST", pattern: "/mcp", body: toolCall, headers: mcpHeaders, scopes: read, setup: loggerDown, want: http.StatusOK},
+		{name: "notification", method: "POST", pattern: "/mcp", body: `{"jsonrpc":"2.0","method":"notifications/initialized"}`, headers: mcpHeaders, scopes: read, want: http.StatusAccepted},
+		{name: "malformed JSON", method: "POST", pattern: "/mcp", body: `{`, headers: mcpHeaders, scopes: read, want: http.StatusBadRequest},
+		{name: "not JSON-RPC", method: "POST", pattern: "/mcp", body: `{"hello":1}`, headers: mcpHeaders, scopes: read, want: http.StatusBadRequest},
+		{name: "no Accept header", method: "POST", pattern: "/mcp", body: mcpInitialize, scopes: read, want: http.StatusBadRequest},
+		{name: "unsupported protocol version", method: "POST", pattern: "/mcp", body: mcpInitialize, headers: with(mcpHeaders, "Mcp-Protocol-Version", "1999-01-01"), scopes: read, want: http.StatusBadRequest},
+		{name: "too large", method: "POST", pattern: "/mcp", body: `{"jsonrpc":"2.0","id":3,"method":"ping","params":{"pad":"` + strings.Repeat("x", mcpMaxRequestBytes) + `"}}`, headers: mcpHeaders, scopes: read, want: http.StatusRequestEntityTooLarge},
+		{name: "not JSON", method: "POST", pattern: "/mcp", body: mcpInitialize, headers: with(mcpHeaders, "Content-Type", "text/plain"), scopes: read, want: http.StatusUnsupportedMediaType},
 	}...)
 }
 
@@ -424,6 +449,13 @@ func TestOpenAPI_DocumentsEveryResponse(t *testing.T) {
 			} else {
 				r.Header.Del("Authorization")
 			}
+			for name, value := range c.headers {
+				if value == "" {
+					r.Header.Del(name)
+				} else {
+					r.Header.Set(name, value)
+				}
+			}
 			if c.setup != nil {
 				c.setup(t, app)
 			}
@@ -445,6 +477,16 @@ func TestOpenAPI_DocumentsEveryResponse(t *testing.T) {
 				t.Fatalf("the broker answered %s, which openapi.yaml does not document for %s (body: %s)", status, key, w.Body.String())
 			}
 
+			// A response the spec gives no content must have no body, and then
+			// has no media type to check.
+			content, _ := spec.resolve(response)["content"].(map[string]any)
+			if content == nil {
+				if w.Body.Len() != 0 {
+					t.Fatalf("openapi.yaml documents %s for %s with no body, but the broker sent %q", status, key, w.Body.String())
+				}
+				return
+			}
+
 			mediaType, _, err := mime.ParseMediaType(w.Header().Get("Content-Type"))
 			if err != nil {
 				t.Fatalf("Content-Type %q: %v", w.Header().Get("Content-Type"), err)
@@ -456,7 +498,6 @@ func TestOpenAPI_DocumentsEveryResponse(t *testing.T) {
 				}
 			}
 
-			content, _ := spec.resolve(response)["content"].(map[string]any)
 			media, ok := content[mediaType]
 			if !ok {
 				t.Fatalf("the broker answered %s as %s, which openapi.yaml does not document", status, mediaType)

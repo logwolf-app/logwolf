@@ -37,8 +37,22 @@ cmd/api/
 | `GET`    | `/logs`       | `read`   | Retrieve events (RPC → Logger → MongoDB) |
 | `GET`    | `/logs/{id}`  | `read`   | Retrieve one event of the key's project  |
 | `DELETE` | `/logs`       | `delete` | Delete matching events (RPC → Logger)    |
+| `POST`   | `/mcp`        | `read`   | The MCP server for AI agents (`mcp.go`)  |
 
 A key without the route's scope gets 403.
+
+### MCP server
+
+`POST /mcp` serves the Model Context Protocol over its Streamable HTTP transport (`mcp.go`, on the official `github.com/modelcontextprotocol/go-sdk`), so agents can analyze a project's events. It runs behind `requireAPIKey` and `requireScope(read)`, and builds a server per request bound to the key's project: no tool takes a project, so none can reach another. It is stateless and answers in JSON (`Stateless`, `JSONResponse`): no `Mcp-Session-Id`, no event streams, `GET` and `DELETE` are 405, and it works the same behind any number of brokers. Bodies are capped at 64 KiB.
+
+| Tool                   | Logger RPC                    | Notes                                                              |
+| ---------------------- | ----------------------------- | ------------------------------------------------------------------ |
+| `get_project_overview` | `GetMetrics`, `GetRetention`  | Plus the server time, for the agent to reason about "recent"       |
+| `search_events`        | `SearchLogs`                  | Filters (`data.LogQuery`), pages; data cut to 1000 bytes per event |
+| `get_event`            | `GetLog`                      | Whole data; another project's id is "event not found"             |
+| `count_events`         | `CountLogs`                   | Total, or per severity, name, tag, hour or day                     |
+
+`since` and `until` take RFC 3339, a date, or a duration back from now (`30m`, `24h`, `7d`; `parseWhen`). Bad arguments, and a logger that fails, are tool errors (`isError`, HTTP 200) the agent can read: a logger failure is logged and told as transient, without its internals. The input schemas state no `default`: the SDK applies defaults to the arguments and panics on a call that has none, so the tools apply them and the descriptions say them. Each call logs one `mcp_tool` line with the tool, the project and the outcome.
 
 Both log reads, `GET /logs` and the dashboard's `GET /projects/{id}/logs`, take `page` and `pageSize` from the query (`paginationFromQuery`). A missing one means the first page, or 20 logs. One that is given must be a whole number within `data.PaginationParams.Validate`'s bounds: `page` from 1 to 1,000,000, `pageSize` from 1 to 100 (`data.MaxPageSize`). Anything else is a 400 rather than a quiet fallback, so a client asking for 1000 logs learns it did not get them. The logger enforces the same bounds in `AllLogs`, whoever calls it: a page is decoded whole in the logger and sent back in one RPC reply, so an unbounded one could load a project's every log into memory.
 
@@ -228,6 +242,7 @@ Events are published to the `logs_topic` exchange with routing key `log.<severit
 
 ```
 Client    → GET /logs                   → requireAPIKey       → RPC call to Logger:5001 → response
+Agent     → POST /mcp (tools/call)      → requireAPIKey       → RPC call to Logger:5001 → JSON-RPC response
 Dashboard → GET /projects/{id}/logs     → requireProject      → RPC call to Logger:5001 → response
 ```
 

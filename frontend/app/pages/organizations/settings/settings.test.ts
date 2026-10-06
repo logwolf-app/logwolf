@@ -54,8 +54,23 @@ describe('/organizations/:id/settings', () => {
 			plan: { name: 'selfhosted', monthly_events: 0, max_retention_days: 0, max_projects: 0, max_members: 0 },
 			usage: { projects: 2, members: 3, events: 1234 },
 		};
+		const usage = {
+			month: '2026-10-01T00:00:00Z',
+			projects: [
+				{
+					project_id: 'abcabcabcabcabcabcabcab1',
+					name: 'API',
+					events: 1200,
+					bytes: 48_000,
+					storage: { events: 900, bytes: 36_000 },
+					storage_measured_at: '2026-10-06T12:00:00Z',
+				},
+			],
+			deleted: { events: 34, bytes: 1360 },
+		};
 		api.getOrganizationMembers.mockResolvedValue([]);
 		api.getOrganizationPlan.mockResolvedValue(plan);
+		api.getOrganizationUsage.mockResolvedValue(usage);
 
 		const data = await loader({
 			request: get(`/organizations/${administered}/settings`, cookie),
@@ -67,10 +82,31 @@ describe('/organizations/:id/settings', () => {
 			organization: { id: administered, role: 'admin' },
 			members: [],
 			plan,
+			usage,
 			currentUser: { id: user.id, login: user.login },
 		});
 		expect(api.getOrganizationMembers).toHaveBeenCalledWith(administered);
 		expect(api.getOrganizationPlan).toHaveBeenCalledWith(administered);
+		expect(api.getOrganizationUsage).toHaveBeenCalledWith(administered);
+	});
+
+	// The broker answers usage by project to owners and admins alone, since it
+	// names every project in the organization.
+	it('does not ask for a member’s usage by project', async () => {
+		api.getOrganizationMembers.mockResolvedValue([]);
+		api.getOrganizationPlan.mockResolvedValue({
+			plan: { name: 'selfhosted', monthly_events: 0, max_retention_days: 0, max_projects: 0, max_members: 0 },
+			usage: { projects: 2, members: 3, events: 1234 },
+		});
+
+		const data = await loader({
+			request: get(`/organizations/${joined}/settings`, cookie),
+			params: { id: joined },
+			context,
+		} as never);
+
+		expect(data).toMatchObject({ organization: { id: joined, role: 'member' }, usage: null });
+		expect(api.getOrganizationUsage).not.toHaveBeenCalled();
 	});
 
 	it('sends an organization the user is not in back to the dashboard', async () => {

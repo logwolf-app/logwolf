@@ -611,6 +611,27 @@ func (r *RPCServer) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *d
 	return nil
 }
 
+// OrganizationProjectsUsage adds up what each of the organization's projects
+// used this calendar month (UTC): its events and bytes, and its storage as last
+// measured. The events of its deleted projects are added up apart.
+func (r *RPCServer) OrganizationProjectsUsage(args *data.RPCOrganizationIDArgs, reply *data.OrganizationProjectsUsage) error {
+	orgID, err := parseOrganizationID("OrganizationProjectsUsage", args.ID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	month := data.UsageMonth(time.Now())
+	usage, err := r.models.GetOrganizationProjectsUsage(ctx, orgID, month, data.NextUsageMonth(month))
+	if err != nil {
+		log.Println("Error adding up organization usage by project:", err)
+		return err
+	}
+	*reply = usage
+	return nil
+}
+
 // RecordUsage stores a broker's running totals of the events it accepted, per
 // project and hour (see data.RecordUsage). The totals replace what the broker
 // sent before rather than adding to it, so a retried flush counts nothing twice.

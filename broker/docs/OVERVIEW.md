@@ -79,6 +79,7 @@ Everything that acts on one project is under `/projects/{id}`, and on one organi
 | `PATCH`  | `/organizations/{id}`                    | admin  | Rename an organization (the plan stays)                            |
 | `POST`   | `/organizations/{id}/projects`           | member | Create a project in the organization, owned by the caller          |
 | `GET`    | `/organizations/{id}/plan`               | member | The plan's limits and the organization's usage (below)             |
+| `GET`    | `/organizations/{id}/usage`              | admin  | This month's usage of each project in the organization (below)     |
 | `GET`    | `/organizations/{id}/members`            | member | List members                                                       |
 | `POST`   | `/organizations/{id}/members`            | admin  | Add a member: `{"login", "user_id", "role"}`; an owner, owner-only |
 | `PATCH`  | `/organizations/{id}/members/{memberID}` | admin  | Change a member's `role`; to or from owner, owner-only             |
@@ -124,6 +125,8 @@ Organization routes deny the same way (`organizations.go`): **404** if the organ
 Admins manage an organization's members, but only owners decide who the owners are: an admin adding an owner is refused with a 403 before the logger is called, and an admin removing, demoting or promoting an owner is refused by the logger (`data.ErrOwnerRequired`, 403), which reads the member's role in the same transaction as the change; the handler passes the caller's role from the access check as `ActorRole`. An organization always keeps one owner, like a project (400).
 
 A new organization starts on the plan the edition picks (`limits.Provider.NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted), never one from the request. `GET /organizations/{id}/plan` answers `{"plan": {"name", "monthly_events", "max_retention_days", "max_projects", "max_members"}, "usage": {"projects", "members", "events"}}`, the plan resolved by the edition from the name the organization stores (`OrganizationPlan`: self-hosted is always the one unlimited plan; hosted, a name not in the table is a 500, never a plan without limits). A limit of 0 is none. `usage.events` is what the organization's projects ingested this calendar month (UTC), as far as the brokers have flushed it; the dashboard compares it with `monthly_events` to show an organization over its quota.
+
+`GET /organizations/{id}/usage` itemizes that month by project (`RPCServer.OrganizationProjectsUsage`): `{"month", "projects": [{"project_id", "name", "events", "bytes", "storage": {"events", "bytes"}, "storage_measured_at"}], "deleted": {"events", "bytes"}}`. Every project in the organization has a line, the most events first; `storage` is the logger's last measure of its stored logs, and `storage_measured_at` the zero time while there is none. `deleted` adds up projects deleted since, whose events still count toward the quota, so the lines add up to `usage.events`. It names projects the caller may not be a member of, so it is for admins and owners.
 
 Creating a project is one logger call, `POST /projects` and
 `POST /organizations/{id}/projects` alike (`{"name", "slug"}`; the second

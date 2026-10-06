@@ -51,6 +51,7 @@ var organizationRoutes = []projectRoute{
 	{http.MethodPatch, orgPath(""), constBody(map[string]string{"name": "Renamed"}), true},
 	{http.MethodPost, orgPath("/projects"), constBody(map[string]string{"name": "Fresh", "slug": "fresh"}), false},
 	{http.MethodGet, orgPath("/plan"), noBody, false},
+	{http.MethodGet, orgPath("/usage"), noBody, true},
 	{http.MethodGet, orgPath("/members"), noBody, false},
 	{http.MethodPost, orgPath("/members"), constBody(map[string]any{"login": "newcomer", "user_id": testUserID("newcomer"), "role": data.RoleMember}), true},
 	{http.MethodPatch, orgMemberTarget("org-member"), constBody(map[string]string{"role": data.RoleAdmin}), true},

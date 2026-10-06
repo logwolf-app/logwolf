@@ -306,4 +306,17 @@ func TestOrganizationProjects_EndToEnd(t *testing.T) {
 	if err := json.Unmarshal(raw, &plan); status != http.StatusOK || err != nil || plan.Usage.Projects != 1 {
 		t.Errorf("plan = %d %s, want 1 project in use", status, raw)
 	}
+
+	// Usage by project names every project, so it is the owners' and admins'.
+	if status, raw := member.call(t, stack, http.MethodGet, base+"/usage", nil); status != http.StatusForbidden {
+		t.Errorf("member reads usage by project = %d, want 403 (data: %s)", status, raw)
+	}
+	status, raw = owner.call(t, stack, http.MethodGet, base+"/usage", nil)
+	var usage data.OrganizationProjectsUsage
+	if err := json.Unmarshal(raw, &usage); status != http.StatusOK || err != nil {
+		t.Fatalf("usage = %d %s, %v", status, raw, err)
+	}
+	if len(usage.Projects) != 1 || usage.Projects[0].ProjectID != project.ID.Hex() || usage.Projects[0].Name != "In Org" {
+		t.Errorf("usage = %+v, want a line for In Org alone", usage)
+	}
 }

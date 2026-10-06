@@ -13,6 +13,12 @@ export const streamTimeout = 5000;
 
 export const handleError: HandleErrorFunction = function (error, { request, context, params }) {
 	if (request.signal.aborted) return;
+	// Exporting handleError replaces React Router's own console logging, so
+	// without a client to capture the error it must still be logged here.
+	if (!logwolf) {
+		console.error(error);
+		return;
+	}
 
 	const event = new LogwolfEvent({ name: 'Server Error', severity: 'critical', tags: ['logwolf_frontend', 'server'] });
 	event.set('error', error);

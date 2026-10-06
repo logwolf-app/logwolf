@@ -152,7 +152,7 @@ Project name, retention, members and deletion all live on `/projects/:id/setting
 
 `lib/api.ts` → calls Broker internal routes via `X-Internal-Secret`, plus `X-User-ID` and `X-User-Login` from the session for the broker's membership checks (`createApi(user)`); project-scoped methods take the project id as an argument. Never calls public SDK routes.
 
-The frontend instruments itself with `@logwolf/client-js` (`lib/logwolf.ts`) for error tracking.
+The frontend instruments itself with `@logwolf/client-js` (`lib/logwolf.ts`) for error tracking, only when `API_KEY` is set: without it there is no client (`logwolfFromEnv` returns null), so the dashboard boots before the first key exists.
 
 ## CI
 
@@ -194,6 +194,7 @@ Per-service env vars:
 | `API_URL`                        | frontend         | —                             | Broker base URL                                                        |
 | `INTERNAL_API_SECRET`            | frontend         | —                             | Shared secret for internal Broker routes                               |
 | `SESSION_SECRET`                 | frontend         | —                             | Session cookie signing key, and the key sealing GitHub tokens         | 
+| `API_KEY`                        | frontend         | —                             | Optional `lw_` key for the dashboard's own telemetry; unset, none      |
 
 ## Detailed docs
 

@@ -1,6 +1,7 @@
 package limits
 
 import (
+	"maps"
 	"slices"
 
 	"logwolf-toolbox/data"
@@ -26,6 +27,13 @@ type Plan struct {
 	MaxProjects int
 	// MaxMembers is how many members the organization may have.
 	MaxMembers int
+	// IngestRate is how many events per second each of the organization's API
+	// keys may send, sustained; Unlimited sets no rate.
+	IngestRate int
+	// IngestBurst is how many events a key may send at once after a quiet
+	// spell: the size of its token bucket, which refills at IngestRate. It is
+	// Unlimited exactly when IngestRate is.
+	IngestBurst int
 }
 
 // Names of the plans organizations may be on.
@@ -45,6 +53,8 @@ var plans = map[string]Plan{
 		MaxRetentionDays: Unlimited,
 		MaxProjects:      Unlimited,
 		MaxMembers:       Unlimited,
+		IngestRate:       Unlimited,
+		IngestBurst:      Unlimited,
 	},
 	PlanFree: {
 		Name:             PlanFree,
@@ -52,6 +62,8 @@ var plans = map[string]Plan{
 		MaxRetentionDays: 30,
 		MaxProjects:      3,
 		MaxMembers:       3,
+		IngestRate:       100,
+		IngestBurst:      1_000,
 	},
 	PlanPro: {
 		Name:             PlanPro,
@@ -59,6 +71,8 @@ var plans = map[string]Plan{
 		MaxRetentionDays: 90,
 		MaxProjects:      20,
 		MaxMembers:       20,
+		IngestRate:       1_000,
+		IngestBurst:      5_000,
 	},
 	PlanTeam: {
 		Name:             PlanTeam,
@@ -66,6 +80,8 @@ var plans = map[string]Plan{
 		MaxRetentionDays: 365,
 		MaxProjects:      Unlimited,
 		MaxMembers:       Unlimited,
+		IngestRate:       5_000,
+		IngestBurst:      20_000,
 	},
 }
 
@@ -74,6 +90,11 @@ var plans = map[string]Plan{
 func PlanByName(name string) (Plan, bool) {
 	p, ok := plans[name]
 	return p, ok
+}
+
+// Plans returns every plan there is, in no particular order.
+func Plans() []Plan {
+	return slices.Collect(maps.Values(plans))
 }
 
 // SelfHostedPlan is the one plan of a self-hosted install, which limits nothing.

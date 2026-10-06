@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"logwolf-toolbox/data"
@@ -294,6 +295,20 @@ func loggerDown(t *testing.T, _ *Config) {
 	t.Setenv("LOGGER_RPC_ADDR", "127.0.0.1:1")
 }
 
+// overRate puts the key's project on a plan of one event a second, and spends
+// the second's event: the key's next event is over its rate.
+func overRate(t *testing.T, app *Config) {
+	app.Limits = &ratePlan{rate: 1, burst: 1}
+	if ok, _, err := app.allowIngest(context.Background(), lastSeededKeyID(), projAlpha, 1); !ok || err != nil {
+		t.Fatalf("spending the key's event: %v, %v", ok, err)
+	}
+}
+
+// planUnknown makes every plan lookup fail.
+func planUnknown(_ *testing.T, app *Config) {
+	app.Limits = &ratePlan{err: fmt.Errorf("logger down")}
+}
+
 func rateLimited(_ *testing.T, _ *Config) {
 	ipLimiterMu.Lock()
 	defer ipLimiterMu.Unlock()
@@ -335,6 +350,8 @@ func apiCases() []apiCase {
 		{name: "data not a string", method: "POST", pattern: "/logs", body: `{"severity":"info","data":{}}`, scopes: ingest, want: http.StatusBadRequest},
 		{name: "malformed JSON", method: "POST", pattern: "/logs", body: `{`, scopes: ingest, want: http.StatusBadRequest},
 		{name: "queue fails", method: "POST", pattern: "/logs", body: event, scopes: ingest, setup: queueFails, want: http.StatusServiceUnavailable},
+		{name: "over the key's rate", method: "POST", pattern: "/logs", body: event, scopes: ingest, setup: overRate, want: http.StatusTooManyRequests},
+		{name: "plan unknown", method: "POST", pattern: "/logs", body: event, scopes: ingest, setup: planUnknown, want: http.StatusInternalServerError},
 
 		{name: "two events", method: "POST", pattern: "/logs/batch", body: "[" + event + "," + event + "]", scopes: ingest, want: http.StatusAccepted},
 		{name: "no events", method: "POST", pattern: "/logs/batch", body: `[]`, scopes: ingest, want: http.StatusAccepted},
@@ -342,6 +359,8 @@ func apiCases() []apiCase {
 		{name: "not an array", method: "POST", pattern: "/logs/batch", body: event, scopes: ingest, want: http.StatusBadRequest},
 		{name: "too many events", method: "POST", pattern: "/logs/batch", body: tooMany, scopes: ingest, want: http.StatusRequestEntityTooLarge},
 		{name: "queue fails", method: "POST", pattern: "/logs/batch", body: "[" + event + "]", scopes: ingest, setup: queueFails, want: http.StatusServiceUnavailable},
+		{name: "over the key's rate", method: "POST", pattern: "/logs/batch", body: "[" + event + "," + event + "]", scopes: ingest, setup: overRate, want: http.StatusTooManyRequests},
+		{name: "plan unknown", method: "POST", pattern: "/logs/batch", body: "[" + event + "]", scopes: ingest, setup: planUnknown, want: http.StatusInternalServerError},
 
 		{name: "first page", method: "GET", pattern: "/logs", target: "/logs", scopes: read, want: http.StatusOK},
 		{name: "largest page", method: "GET", pattern: "/logs", target: fmt.Sprintf("/logs?page=2&pageSize=%d", data.MaxPageSize), scopes: read, want: http.StatusOK},
@@ -385,10 +404,8 @@ func TestOpenAPI_DocumentsEveryResponse(t *testing.T) {
 			newInternalTestServer(t)
 			resetAuthCaches(t)
 			app := &Config{Events: &fakePublisher{}}
-			if c.setup != nil {
-				c.setup(t, app)
-			}
 
+			// The key is seeded before setup, which may act on it.
 			r := keyRequest(c.method, target, "", c.body)
 			if c.scopes != nil {
 				r.Header.Set("Authorization", "Bearer "+seedKey(t, projAlpha, c.scopes...))
@@ -396,6 +413,9 @@ func TestOpenAPI_DocumentsEveryResponse(t *testing.T) {
 				r.Header.Set("Authorization", c.auth)
 			} else {
 				r.Header.Del("Authorization")
+			}
+			if c.setup != nil {
+				c.setup(t, app)
 			}
 			w := do(app.routes(), r)
 
@@ -419,6 +439,13 @@ func TestOpenAPI_DocumentsEveryResponse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Content-Type %q: %v", w.Header().Get("Content-Type"), err)
 			}
+			headers, _ := spec.resolve(response)["headers"].(map[string]any)
+			for name, h := range headers {
+				if required, _ := spec.resolve(h)["required"].(bool); required && w.Header().Get(name) == "" {
+					t.Errorf("the broker answered %s without the %s header openapi.yaml requires", status, name)
+				}
+			}
+
 			content, _ := spec.resolve(response)["content"].(map[string]any)
 			media, ok := content[mediaType]
 			if !ok {

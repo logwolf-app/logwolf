@@ -150,16 +150,16 @@ Declares the RabbitMQ topology used by all services:
 
 `Provider` is the extension point between self-hosted and hosted Logwolf: it answers "which plan's limits apply to this project?" (`Plan`), "may this project ingest `n` more events?" (`AllowIngest`), "which retention values may it pick?" (`RetentionChoices`), "what plan is an organization that stores this plan name on?" (`OrganizationPlan`) and "what plan does a new organization start on?" (`NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted). Self-hosted answers `OrganizationPlan` with its one plan whatever the name; hosted, a name not in the table is an error. Project ids are hex strings, as services pass them to each other. Every retention choice must be one of `data.ValidRetentionDays`, the only values the logger stores.
 
-Plans live in code (`plans.go`), not in the database: an organization stores only its plan's name (`organizations.plan`), and `PlanByName` turns that into a `Plan`: `MonthlyEvents`, `MaxRetentionDays`, `MaxProjects` and `MaxMembers`, where `Unlimited` (0) sets no limit, and for retention allows forever. A plan's `RetentionChoices` are every supported value up to its maximum, in the dashboard's order, forever first and only when there is no maximum.
+Plans live in code (`plans.go`), not in the database: an organization stores only its plan's name (`organizations.plan`), and `PlanByName` turns that into a `Plan`: `MonthlyEvents`, `MaxRetentionDays`, `MaxProjects`, `MaxMembers`, and `IngestRate` and `IngestBurst` (each API key's token bucket in the Broker: events a second, and how many it holds; both set or both `Unlimited`), where `Unlimited` (0) sets no limit, and for retention allows forever. A plan's `RetentionChoices` are every supported value up to its maximum, in the dashboard's order, forever first and only when there is no maximum.
 
-| Plan         | Monthly events | Max retention | Max projects | Max members |
-| ------------ | -------------- | ------------- | ------------ | ----------- |
-| `selfhosted` | unlimited      | forever       | unlimited    | unlimited   |
-| `free`       | 100,000        | 30 days       | 3            | 3           |
-| `pro`        | 5,000,000      | 90 days       | 20           | 20          |
-| `team`       | 25,000,000     | 365 days      | unlimited    | unlimited   |
+| Plan         | Monthly events | Max retention | Max projects | Max members | Ingest rate per key | Burst     |
+| ------------ | -------------- | ------------- | ------------ | ----------- | ------------------- | --------- |
+| `selfhosted` | unlimited      | forever       | unlimited    | unlimited   | unlimited           | unlimited |
+| `free`       | 100,000        | 30 days       | 3            | 3           | 100/s               | 1,000     |
+| `pro`        | 5,000,000      | 90 days       | 20           | 20          | 1,000/s             | 5,000     |
+| `team`       | 25,000,000     | 365 days      | unlimited    | unlimited   | 5,000/s             | 20,000    |
 
-`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which puts every project on the one `selfhosted` plan without looking anything up: any ingest, and every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` is `Organizations`, which resolves a project's plan through a `PlanLookup` the service supplies (the Broker's asks the logger, `RPCServer.ProjectPlan`). A plan name not in the table is an error, never a plan without limits, and so is `cloud` without a lookup, or any unknown edition, so a hosted deployment never runs on self-hosted limits by accident. Events are not counted yet, so `Organizations.AllowIngest` allows them all. The Broker asks the provider for retention choices; the ingest check has no caller yet.
+`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which puts every project on the one `selfhosted` plan without looking anything up: any ingest, and every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` is `Organizations`, which resolves a project's plan through a `PlanLookup` the service supplies (the Broker's asks the logger, `RPCServer.ProjectPlan`). A plan name not in the table is an error, never a plan without limits, and so is `cloud` without a lookup, or any unknown edition, so a hosted deployment never runs on self-hosted limits by accident. Events are not counted yet, so `Organizations.AllowIngest` allows them all. The Broker asks the provider for retention choices, and for each API key's plan to size its ingestion rate; the `AllowIngest` check has no caller yet.
 
 ## `rabbitmq` package
 

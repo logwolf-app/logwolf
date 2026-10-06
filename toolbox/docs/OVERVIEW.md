@@ -17,6 +17,7 @@ toolbox/
 │   ├── project.go   # Project and ProjectMember models, membership queries
 │   ├── organization.go # Organization and OrganizationMember models, membership queries
 │   ├── user.go      # Users, keyed by GitHub user ID
+│   ├── usage.go     # Usage metering: hourly buckets of accepted events, bytes and storage
 │   ├── migrate.go   # Startup migration of pre-multi-tenancy data
 │   └── log.go       # Log entry type aliases
 ├── event/
@@ -103,13 +104,24 @@ An `OrganizationMember` is a user's membership: `organization_id`, `user_id` (th
 
 - `CreateOrganizationWithOwner` inserts an organization and its first owner's membership in one transaction; it refuses one without a name or a plan (`ErrInvalidOrganization`) or an owner (`ErrInvalidUser`). `RenameOrganization` changes the name alone.
 - `RemoveOrganizationMember` and `UpdateOrganizationMemberRole` take the membership's own `_id` and run in a transaction that writes to the organization's document first, as `changeMembers` does for projects (both go through `changeMembersOf`), so two concurrent changes can never leave an organization without an owner: the loser gets `ErrLastOrganizationOwner`. An admin is not an owner, and does not count as one. Both take the role of whoever makes the change (`actorRole`), and refuse anyone but an owner a change that removes, demotes or promotes an owner (`ErrOwnerRequired`), deciding on the member's role as read in the transaction.
-- `GetOrganizationUsage(ctx, orgID)` counts the organization's projects and members (`OrganizationUsage`), what its plan limits; events are not counted yet.
+- `GetOrganizationUsage(ctx, orgID)` counts what the organization has of what its plan limits (`OrganizationUsage`): its projects, its members, and its events this calendar month, from `usage` (below).
 - `ProjectPlan(ctx, projectID)` is the name of the plan of the project's organization, which the hosted edition's `limits.Provider` resolves the project's limits from; `ErrUnknownOrganization` for a project in no organization, or in one that does not exist.
 - `OrganizationRole(orgID, userID)` is the user's role, `""` for a non-member or a missing organization; `OrganizationExists` tells the two apart. `GetOrganizationsForUser` lists the user's organizations with their role in each (`UserOrganization`).
 
 Project roles stay what each project's memberships say. Organization roles do not carry into projects, except one: an organization owner is owner of every project in the organization. `EffectiveProjectRole(projectRole, orgRole)` is that rule. `AccessToProject(projectID, userID, login)` applies it for the logger's `ProjectAccess`: whether the project exists and the caller's role in it, from their own membership, or owner when they own its organization. `GetProjectsForUser` lists the projects of the organizations the user owns as well, as owner.
 
 Every project belongs to an organization. The deployment has one the startup migration creates, `Default` (`DefaultOrganizationName`, on `SelfHostedPlan`), found by its `Default` flag, which a partial unique index (`unique_default`, from `EnsureOrganizationIndexes`) allows on one organization only; `GetDefaultOrganization` returns it. Its owners can include logins nobody has signed in under yet, which no membership can name, so those are kept on the organization as `pending_owners`. `ClaimPendingOwnerships(githubID, login)` runs at each sign-in, like `LinkMemberships`: it makes the user an owner of each organization waiting for their login (promoting a member), and takes the login off the list, in a transaction serialized with the organization's other member changes. A `pending_owners` index serves the lookup.
+
+### Usage (`usage.go`)
+
+The `usage` collection holds what each project uses, in hourly buckets: one document per `project_id`, `hour` (`UsageHour`: the start of the hour, in UTC) and `source`. `EnsureUsageIndexes` creates the unique `(project_id, hour, source)` index (`usage_project_hour_source`), the `(organization_id, hour)` index (`usage_organization_hour`) and a TTL index on `hour` (`usage_hour_ttl`) that expires a bucket `UsageRetention` (400 days) after its hour, whatever the project's log retention.
+
+- `RecordUsage(ctx, source, counts)` stores a Broker run's running totals (`UsageCount`: `events` and `bytes` per project and hour), each bucket keeping the larger of its value and the one sent, so a count sent again, or late, changes nothing. Each bucket also gets the `organization_id` of its project's organization, read at the write; one whose project is gone keeps the one it has. It refuses (`ErrInvalidUsage`) an empty source, the storage job's (`StorageSource`), or a negative count, before any write. Over RPC the counts carry the project as a hex string (`RPCRecordUsageArgs`, `RPCUsageCount`).
+- `MeasureProjectStorage(ctx, projectID)` counts a project's logs and adds up their BSON sizes (`ProjectStorage`); it reads them all, so only the Logger's periodic job calls it. `RecordProjectStorage(ctx, projectID, at, storage)` writes the measure to the hour's `StorageSource` bucket (`stored_events`, `stored_bytes`, `measured_at`), replacing an earlier one of the same hour.
+- `GetProjectUsage(ctx, projectID, from, to)` adds up the events and bytes every Broker run recorded in the hour buckets from `from`'s up to `to`, and takes the last storage measure before `to` (`ProjectUsage`).
+- `GetOrganizationProjectsUsage(ctx, orgID, from, to)` is that window project by project (`OrganizationProjectsUsage`): a line for every project in the organization, idle ones included, the most events first, with the events and bytes of the buckets naming the organization and the last storage measure before `to`; what projects no longer in it used goes to `Deleted`, so the lines add up to `GetOrganizationEvents`.
+- `GetOrganizationEvents(ctx, orgID, from, to)` adds up the events of every bucket naming the organization in the window, deleted projects' included, so deleting a project gives back nothing of the monthly quota. `UsageMonth` and `NextUsageMonth` bound a calendar month in UTC.
+- `ProjectQuota(ctx, projectID, now)` is what the monthly quota needs of a project (`ProjectQuota`): its organization's id (hex), that organization's plan name, the month of `now`, and the organization's events in it so far. It fails like `ProjectPlan`.
 
 ### Startup migration (`migrate.go`)
 
@@ -148,18 +160,18 @@ Declares the RabbitMQ topology used by all services:
 
 ## `limits` package
 
-`Provider` is the extension point between self-hosted and hosted Logwolf: it answers "which plan's limits apply to this project?" (`Plan`), "may this project ingest `n` more events?" (`AllowIngest`), "which retention values may it pick?" (`RetentionChoices`), "what plan is an organization that stores this plan name on?" (`OrganizationPlan`) and "what plan does a new organization start on?" (`NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted). Self-hosted answers `OrganizationPlan` with its one plan whatever the name; hosted, a name not in the table is an error. Project ids are hex strings, as services pass them to each other. Every retention choice must be one of `data.ValidRetentionDays`, the only values the logger stores.
+`Provider` is the extension point between self-hosted and hosted Logwolf: it answers "which plan's limits apply to this project?" (`Plan`), "what monthly event quota do this project's events count toward, and how much of it is used?" (`MonthlyQuota`, a `Quota`: the organization, the plan's `MonthlyEvents` as `Limit`, the month and `Used`), "which retention values may it pick?" (`RetentionChoices`), "what plan is an organization that stores this plan name on?" (`OrganizationPlan`) and "what plan does a new organization start on?" (`NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted). Self-hosted answers `OrganizationPlan` with its one plan whatever the name; hosted, a name not in the table is an error. Project ids are hex strings, as services pass them to each other. Every retention choice must be one of `data.ValidRetentionDays`, the only values the logger stores.
 
-Plans live in code (`plans.go`), not in the database: an organization stores only its plan's name (`organizations.plan`), and `PlanByName` turns that into a `Plan`: `MonthlyEvents`, `MaxRetentionDays`, `MaxProjects` and `MaxMembers`, where `Unlimited` (0) sets no limit, and for retention allows forever. A plan's `RetentionChoices` are every supported value up to its maximum, in the dashboard's order, forever first and only when there is no maximum.
+Plans live in code (`plans.go`), not in the database: an organization stores only its plan's name (`organizations.plan`), and `PlanByName` turns that into a `Plan`: `MonthlyEvents`, `MaxRetentionDays`, `MaxProjects`, `MaxMembers`, and `IngestRate` and `IngestBurst` (each API key's token bucket in the Broker: events a second, and how many it holds; both set or both `Unlimited`), where `Unlimited` (0) sets no limit, and for retention allows forever. A plan's `RetentionChoices` are every supported value up to its maximum, in the dashboard's order, forever first and only when there is no maximum.
 
-| Plan         | Monthly events | Max retention | Max projects | Max members |
-| ------------ | -------------- | ------------- | ------------ | ----------- |
-| `selfhosted` | unlimited      | forever       | unlimited    | unlimited   |
-| `free`       | 100,000        | 30 days       | 3            | 3           |
-| `pro`        | 5,000,000      | 90 days       | 20           | 20          |
-| `team`       | 25,000,000     | 365 days      | unlimited    | unlimited   |
+| Plan         | Monthly events | Max retention | Max projects | Max members | Ingest rate per key | Burst     |
+| ------------ | -------------- | ------------- | ------------ | ----------- | ------------------- | --------- |
+| `selfhosted` | unlimited      | forever       | unlimited    | unlimited   | unlimited           | unlimited |
+| `free`       | 100,000        | 30 days       | 3            | 3           | 100/s               | 1,000     |
+| `pro`        | 5,000,000      | 90 days       | 20           | 20          | 1,000/s             | 5,000     |
+| `team`       | 25,000,000     | 365 days      | unlimited    | unlimited   | 5,000/s             | 20,000    |
 
-`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which puts every project on the one `selfhosted` plan without looking anything up: any ingest, and every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` is `Organizations`, which resolves a project's plan through a `PlanLookup` the service supplies (the Broker's asks the logger, `RPCServer.ProjectPlan`). A plan name not in the table is an error, never a plan without limits, and so is `cloud` without a lookup, or any unknown edition, so a hosted deployment never runs on self-hosted limits by accident. Events are not counted yet, so `Organizations.AllowIngest` allows them all. The Broker asks the provider for retention choices; the ingest check has no caller yet.
+`LOGWOLF_EDITION` picks the implementation (`FromEnv`, `ForEdition`): `selfhosted`, the default, is `SelfHosted`, which puts every project on the one `selfhosted` plan without looking anything up: no quota, and every supported retention (forever, 30, 60, 90, 180, 365 days, in that order). `cloud` is `Organizations`, which resolves a project's plan and quota through the `Lookups` the service supplies: a `PlanLookup` and a `QuotaLookup` (the Broker's ask the logger, `RPCServer.ProjectPlan` and `RPCServer.ProjectQuota`). A plan name not in the table is an error, never a plan without limits, and so is `cloud` without both lookups, or any unknown edition, so a hosted deployment never runs on self-hosted limits by accident. The Broker asks the provider for retention choices, for each API key's plan to size its ingestion rate, and for each project's monthly quota, which it counts against per organization.
 
 ## `rabbitmq` package
 

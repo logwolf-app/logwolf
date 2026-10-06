@@ -7,18 +7,17 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"logwolf-toolbox/data"
 )
 
 const project = "aaaaaaaaaaaaaaaaaaaaaa01"
 
-func TestSelfHosted_AllowsAnyIngest(t *testing.T) {
-	for _, n := range []int{0, 1, 1000, 1 << 30} {
-		ok, err := SelfHosted{}.AllowIngest(context.Background(), project, n)
-		if err != nil || !ok {
-			t.Errorf("AllowIngest(%d) = %v, %v; want true, nil", n, ok, err)
-		}
+func TestSelfHosted_HasNoQuota(t *testing.T) {
+	q, err := SelfHosted{}.MonthlyQuota(context.Background(), project)
+	if err != nil || q.Limit != Unlimited {
+		t.Errorf("MonthlyQuota = %+v, %v; want no limit", q, err)
 	}
 }
 
@@ -73,7 +72,7 @@ func TestEditionFromEnv(t *testing.T) {
 
 func TestForEdition(t *testing.T) {
 	// Self-hosted never looks a plan up, so it needs no lookup.
-	p, err := ForEdition(EditionSelfHosted, nil)
+	p, err := ForEdition(EditionSelfHosted, Lookups{})
 	if err != nil {
 		t.Fatalf("ForEdition(selfhosted): %v", err)
 	}
@@ -81,7 +80,7 @@ func TestForEdition(t *testing.T) {
 		t.Errorf("ForEdition(selfhosted) = %T, want SelfHosted", p)
 	}
 
-	p, err = ForEdition(EditionCloud, planNamed(PlanFree))
+	p, err = ForEdition(EditionCloud, Lookups{Plan: planNamed(PlanFree), Quota: quotaOf(PlanFree, 0)})
 	if err != nil {
 		t.Fatalf("ForEdition(cloud): %v", err)
 	}
@@ -90,19 +89,25 @@ func TestForEdition(t *testing.T) {
 	}
 
 	// Running a cloud deployment on self-hosted limits would give every
-	// project everything, so cloud without a way to find a project's plan is
-	// an error, as is an edition with no provider at all.
-	if p, err := ForEdition(EditionCloud, nil); err == nil {
-		t.Errorf("ForEdition(cloud, nil) = %T, want an error", p)
+	// project everything, so cloud without a way to find a project's plan or
+	// quota is an error, as is an edition with no provider at all.
+	if p, err := ForEdition(EditionCloud, Lookups{}); err == nil {
+		t.Errorf("ForEdition(cloud, no lookups) = %T, want an error", p)
 	}
-	if p, err := ForEdition("enterprise", planNamed(PlanFree)); err == nil {
+	if p, err := ForEdition(EditionCloud, Lookups{Plan: planNamed(PlanFree)}); err == nil {
+		t.Errorf("ForEdition(cloud, no quota lookup) = %T, want an error", p)
+	}
+	if p, err := ForEdition(EditionCloud, Lookups{Quota: quotaOf(PlanFree, 0)}); err == nil {
+		t.Errorf("ForEdition(cloud, no plan lookup) = %T, want an error", p)
+	}
+	if p, err := ForEdition("enterprise", Lookups{Plan: planNamed(PlanFree), Quota: quotaOf(PlanFree, 0)}); err == nil {
 		t.Errorf("ForEdition(enterprise) = %T, want an error", p)
 	}
 }
 
 func TestFromEnv_DefaultsToSelfHosted(t *testing.T) {
 	t.Setenv("LOGWOLF_EDITION", "")
-	p, err := FromEnv(nil)
+	p, err := FromEnv(Lookups{})
 	if err != nil {
 		t.Fatalf("FromEnv: %v", err)
 	}
@@ -124,6 +129,16 @@ func TestSelfHosted_PlanIsTheSelfHostedPlan(t *testing.T) {
 // planNamed is a PlanLookup that puts every project on the plan called name.
 func planNamed(name string) PlanLookup {
 	return func(context.Context, string) (string, error) { return name, nil }
+}
+
+const organization = "bbbbbbbbbbbbbbbbbbbbbb01"
+
+// quotaOf is a QuotaLookup that puts every project in organization, on the plan
+// called name, with events used this month.
+func quotaOf(name string, events int64) QuotaLookup {
+	return func(context.Context, string) (data.ProjectQuota, error) {
+		return data.ProjectQuota{OrganizationID: organization, Plan: name, Month: data.UsageMonth(time.Now()), Events: events}, nil
+	}
 }
 
 // The hosted edition's limits are those of the plan the project's organization
@@ -219,5 +234,48 @@ func TestOrganizations_OrganizationPlans(t *testing.T) {
 	}
 	if got, want := o.NewOrganizationPlan(), plans[PlanFree]; got != want {
 		t.Errorf("NewOrganizationPlan = %+v, want %+v", got, want)
+	}
+}
+
+// A hosted project's quota is its organization's plan's monthly events, with
+// what the organization has used of them.
+func TestOrganizations_MonthlyQuotaIsThePlans(t *testing.T) {
+	var asked []string
+	month := time.Date(2026, time.October, 1, 0, 0, 0, 0, time.UTC)
+	o := Organizations{QuotaOf: func(_ context.Context, projectID string) (data.ProjectQuota, error) {
+		asked = append(asked, projectID)
+		return data.ProjectQuota{OrganizationID: organization, Plan: PlanFree, Month: month, Events: 42}, nil
+	}}
+
+	got, err := o.MonthlyQuota(context.Background(), project)
+	if err != nil {
+		t.Fatalf("MonthlyQuota: %v", err)
+	}
+	want := Quota{OrganizationID: organization, Limit: plans[PlanFree].MonthlyEvents, Month: month, Used: 42}
+	if got != want {
+		t.Errorf("MonthlyQuota = %+v, want %+v", got, want)
+	}
+	if !slices.Equal(asked, []string{project}) {
+		t.Errorf("QuotaOf asked about %v, want %v", asked, []string{project})
+	}
+
+	// An organization on the self-hosted plan has no quota under either
+	// edition.
+	got, err = Organizations{QuotaOf: quotaOf(PlanSelfHosted, 1<<40)}.MonthlyQuota(context.Background(), project)
+	if err != nil || got.Limit != Unlimited {
+		t.Errorf("MonthlyQuota on the self-hosted plan = %+v, %v; want no limit", got, err)
+	}
+}
+
+// A quota that cannot be told is an error, never a quota without a limit.
+func TestOrganizations_MonthlyQuotaFailures(t *testing.T) {
+	if q, err := (Organizations{QuotaOf: quotaOf("enterprise", 0)}).MonthlyQuota(context.Background(), project); err == nil || !strings.Contains(err.Error(), `"enterprise"`) {
+		t.Errorf("MonthlyQuota on an unknown plan = %+v, %v; want an error naming the plan", q, err)
+	}
+
+	lookupErr := errors.New("logger unavailable")
+	o := Organizations{QuotaOf: func(context.Context, string) (data.ProjectQuota, error) { return data.ProjectQuota{}, lookupErr }}
+	if _, err := o.MonthlyQuota(context.Background(), project); !errors.Is(err, lookupErr) {
+		t.Errorf("MonthlyQuota error = %v, want it to wrap %v", err, lookupErr)
 	}
 }

@@ -137,6 +137,7 @@ export function fakeApi(overrides: Partial<IApi> = {}): { [K in keyof IApi]: Ret
 		'getOrganizations',
 		'updateOrganization',
 		'getOrganizationPlan',
+		'getOrganizationUsage',
 		'getOrganizationMembers',
 		'addOrganizationMember',
 		'updateOrganizationMemberRole',

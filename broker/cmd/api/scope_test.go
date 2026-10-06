@@ -21,10 +21,11 @@ var seededKeyCounter atomic.Int64
 // router accepts the key without a MongoDB behind app.Models.
 func seedKey(t *testing.T, projectID string, scopes ...string) string {
 	t.Helper()
-	plaintext := fmt.Sprintf("lw_scopetest%034d", seededKeyCounter.Add(1))
+	n := seededKeyCounter.Add(1)
+	plaintext := fmt.Sprintf("lw_scopetest%034d", n)
 
 	keyCacheMu.Lock()
-	keyCache[hashKey(plaintext)] = cacheEntry{valid: true, projectID: projectID, scopes: scopes, expiresAt: time.Now().Add(time.Minute)}
+	keyCache[hashKey(plaintext)] = cacheEntry{valid: true, keyID: seededKeyID(n), projectID: projectID, scopes: scopes, expiresAt: time.Now().Add(time.Minute)}
 	keyCacheMu.Unlock()
 	t.Cleanup(func() {
 		keyCacheMu.Lock()
@@ -32,6 +33,16 @@ func seedKey(t *testing.T, projectID string, scopes ...string) string {
 		keyCacheMu.Unlock()
 	})
 	return plaintext
+}
+
+// seededKeyID is the id of the nth key seedKey made.
+func seededKeyID(n int64) string {
+	return fmt.Sprintf("seeded-key-%d", n)
+}
+
+// lastSeededKeyID is the id of the key seedKey made last.
+func lastSeededKeyID() string {
+	return seededKeyID(seededKeyCounter.Load())
 }
 
 func keyRequest(method, target, key, body string) *http.Request {

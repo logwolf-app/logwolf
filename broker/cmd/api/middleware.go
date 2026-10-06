@@ -24,9 +24,19 @@ const projectIDKey contextKey = "projectID"
 const userLoginKey contextKey = "userLogin"
 const userIDKey contextKey = "userID"
 const keyScopesKey contextKey = "keyScopes"
+const keyIDKey contextKey = "keyID"
 
 func projectIDFromContext(r *http.Request) string {
 	if v, ok := r.Context().Value(projectIDKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// keyIDFromContext returns the id of the request's API key, which
+// requireAPIKey stored; "" outside the API key routes.
+func keyIDFromContext(r *http.Request) string {
+	if v, ok := r.Context().Value(keyIDKey).(string); ok {
 		return v
 	}
 	return ""
@@ -197,20 +207,21 @@ func recordFailure(addr string) bool {
 }
 
 // isRateLimited checks whether addr has already hit the limit, without
-// incrementing the counter.
-func isRateLimited(addr string) bool {
+// incrementing the counter, and if so for how much longer.
+func isRateLimited(addr string) (bool, time.Duration) {
 	ipLimiterMu.Lock()
 	defer ipLimiterMu.Unlock()
 
 	entry, ok := ipLimiter[addr]
 	if !ok {
-		return false
+		return false, 0
 	}
-	if time.Now().After(entry.windowEnd) {
+	now := time.Now()
+	if now.After(entry.windowEnd) {
 		delete(ipLimiter, addr)
-		return false
+		return false, 0
 	}
-	return entry.failures >= maxFailures
+	return entry.failures >= maxFailures, entry.windowEnd.Sub(now)
 }
 
 // --- Sweeping ---
@@ -223,7 +234,10 @@ func isRateLimited(addr string) bool {
 const authCacheSweepInterval = time.Minute
 
 // sweepAuthCaches deletes the keyCache entries and ipLimiter windows that have
-// expired by now.
+// expired by now, and the ingestBuckets that are full again and have not been
+// sized for ingestPlanTTL: a key's next request starts it again from a full
+// bucket, which is what it would have found. It also sweeps the monthly quotas
+// (sweepQuotas).
 func sweepAuthCaches(now time.Time) {
 	keyCacheMu.Lock()
 	for k, e := range keyCache {
@@ -240,6 +254,16 @@ func sweepAuthCaches(now time.Time) {
 		}
 	}
 	ipLimiterMu.Unlock()
+
+	ingestBucketsMu.Lock()
+	for k, b := range ingestBuckets {
+		if now.Sub(b.sizedAt) >= ingestPlanTTL && b.full(now) {
+			delete(ingestBuckets, k)
+		}
+	}
+	ingestBucketsMu.Unlock()
+
+	sweepQuotas(now)
 }
 
 // sweepAuthCachesEvery runs sweepAuthCaches every interval until ctx is done.
@@ -293,10 +317,11 @@ func (app *Config) requireAPIKeyWith(v keyValidator, next http.Handler) http.Han
 		ip := clientIP(r, app.TrustedProxies)
 
 		// Pre-check: reject immediately if this IP is already rate-limited.
-		if isRateLimited(ip) {
+		if limited, wait := isRateLimited(ip); limited {
 			log.Printf(`{"event":"auth","outcome":"deny","reason":"rate_limited","method":"%s","path":"%s","remote_addr":"%s","client_ip":"%s"}`,
 				r.Method, r.URL.Path, r.RemoteAddr, ip)
-			app.errorJSON(w, fmt.Errorf("too many failed attempts"), http.StatusTooManyRequests)
+			setRetryAfter(w, wait)
+			app.errorCodeJSON(w, fmt.Errorf("too many failed attempts"), http.StatusTooManyRequests, codeRateLimited)
 			return
 		}
 
@@ -328,7 +353,7 @@ func (app *Config) requireAPIKeyWith(v keyValidator, next http.Handler) http.Han
 			}
 			log.Printf(`{"event":"auth","outcome":"allow","key_prefix":"%s","method":"%s","path":"%s","remote_addr":"%s","client_ip":"%s","source":"cache"}`,
 				keyPrefix, r.Method, r.URL.Path, r.RemoteAddr, ip)
-			next.ServeHTTP(w, withKey(r, entry.projectID, entry.scopes))
+			next.ServeHTTP(w, withKey(r, entry.keyID, entry.projectID, entry.scopes))
 			return
 		}
 
@@ -363,14 +388,16 @@ func (app *Config) requireAPIKeyWith(v keyValidator, next http.Handler) http.Han
 
 		log.Printf(`{"event":"auth","outcome":"allow","key_prefix":"%s","method":"%s","path":"%s","remote_addr":"%s","client_ip":"%s","source":"db"}`,
 			keyPrefix, r.Method, r.URL.Path, r.RemoteAddr, ip)
-		next.ServeHTTP(w, withKey(r, projectID, scopes))
+		next.ServeHTTP(w, withKey(r, keyID, projectID, scopes))
 	})
 }
 
 // withKey stores what requireAPIKey learned about the key in the request
-// context: the project it belongs to and the scopes requireScope checks.
-func withKey(r *http.Request, projectID string, scopes []string) *http.Request {
-	ctx := context.WithValue(r.Context(), projectIDKey, projectID)
+// context: its id, which its ingestion rate is kept under, the project it
+// belongs to and the scopes requireScope checks.
+func withKey(r *http.Request, keyID, projectID string, scopes []string) *http.Request {
+	ctx := context.WithValue(r.Context(), keyIDKey, keyID)
+	ctx = context.WithValue(ctx, projectIDKey, projectID)
 	ctx = context.WithValue(ctx, keyScopesKey, scopes)
 	return r.WithContext(ctx)
 }

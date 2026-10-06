@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import type { UserProject } from './api';
+import type { OrganizationPlan, UserProject } from './api';
 import {
 	assignableOrganizationRoles,
 	canManageOrganization,
+	formatRenewal,
+	overQuota,
 	pathAfterOrganizationSwitch,
 	projectGroups,
+	quotaRenewsAt,
 	resolveCurrent,
 } from './organizations';
 
@@ -116,5 +119,30 @@ describe('organization roles', () => {
 	it('lets only an owner make owners', () => {
 		expect(assignableOrganizationRoles('owner')).toContain('owner');
 		expect(assignableOrganizationRoles('admin')).not.toContain('owner');
+	});
+});
+
+describe('monthly quota', () => {
+	const plan = (monthly_events: number, events: number): OrganizationPlan => ({
+		plan: { name: 'free', monthly_events, max_retention_days: 30, max_projects: 3, max_members: 3 },
+		usage: { projects: 1, members: 1, events },
+	});
+
+	it('is over once the month’s events are used, and never without a limit', () => {
+		expect(overQuota(plan(100, 99))).toBe(false);
+		expect(overQuota(plan(100, 100))).toBe(true);
+		expect(overQuota(plan(100, 101))).toBe(true);
+		expect(overQuota(plan(0, 1_000_000))).toBe(false);
+	});
+
+	it('renews on the first of next month, in UTC', () => {
+		expect(quotaRenewsAt(new Date('2026-10-31T23:59:59Z')).toISOString()).toBe('2026-11-01T00:00:00.000Z');
+		expect(quotaRenewsAt(new Date('2026-12-15T12:00:00Z')).toISOString()).toBe('2027-01-01T00:00:00.000Z');
+		// Already November in UTC, though still October west of it.
+		expect(quotaRenewsAt(new Date('2026-10-31T21:00:00-05:00')).toISOString()).toBe('2026-12-01T00:00:00.000Z');
+	});
+
+	it('words the renewal as the day, in UTC', () => {
+		expect(formatRenewal('2026-11-01T00:00:00.000Z', 'en-US')).toBe('November 1');
 	});
 });

@@ -1,17 +1,40 @@
 import { data, Outlet, redirect } from 'react-router';
 
 import { AppSidebar } from '~/components/nav/app-sidebar';
+import { QuotaBanner, type QuotaExceeded } from '~/components/nav/quota-banner';
 import { SidebarInset, SidebarProvider } from '~/components/ui/sidebar';
 import { Toaster } from '~/components/ui/sonner';
 import { eventContext } from '~/context';
-import { createApi } from '~/lib/api';
+import { createApi, type IApi, type UserOrganization } from '~/lib/api';
 import { requireAuth } from '~/lib/auth.server';
 import { getOrCreateCsrfToken } from '~/lib/csrf.server';
-import { resolveCurrent } from '~/lib/organizations';
+import { overQuota, quotaRenewsAt, resolveCurrent, SELF_HOSTED_PLAN } from '~/lib/organizations';
 import { commitSession, getSession } from '~/lib/session.server';
 import { ThemeProvider } from '~/store/theme-provider';
 
 import type { Route } from './+types/layout';
+
+/**
+ * The organization's used-up quota, for the banner over every page, or null
+ * while it has events left. The self-hosted plan limits nothing, so it is not
+ * asked about; and a plan that cannot be read leaves out the banner, not the
+ * page.
+ */
+async function exceededQuota(api: IApi, organization: UserOrganization): Promise<QuotaExceeded | null> {
+	if (organization.plan === SELF_HOSTED_PLAN) return null;
+	try {
+		const plan = await api.getOrganizationPlan(organization.id);
+		if (!overQuota(plan)) return null;
+		return {
+			organizationId: organization.id,
+			organizationName: organization.name,
+			monthlyEvents: plan.plan.monthly_events,
+			renewsAt: quotaRenewsAt().toISOString(),
+		};
+	} catch {
+		return null;
+	}
+}
 
 export async function loader({ request, context }: Route.LoaderArgs) {
 	const event = context.get(eventContext);
@@ -63,14 +86,17 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	event?.set('currentProjectID', currentProject?.id ?? null);
 	event?.set('currentOrganizationID', currentOrganization?.id ?? null);
 
+	const quotaExceeded = currentOrganization ? await exceededQuota(api, currentOrganization) : null;
+	event?.set('quotaExceeded', quotaExceeded !== null);
+
 	return data(
-		{ user, csrfToken, projects, currentProject, organizations, currentOrganization },
+		{ user, csrfToken, projects, currentProject, organizations, currentOrganization, quotaExceeded },
 		{ headers: { 'Set-Cookie': await commitSession(session) } },
 	);
 }
 
 export default function Layout({ matches, loaderData }: Route.ComponentProps) {
-	const { user, projects, currentProject, organizations, currentOrganization, csrfToken } = loaderData;
+	const { user, projects, currentProject, organizations, currentOrganization, csrfToken, quotaExceeded } = loaderData;
 
 	return (
 		<ThemeProvider>
@@ -86,6 +112,7 @@ export default function Layout({ matches, loaderData }: Route.ComponentProps) {
 				/>
 
 				<SidebarInset>
+					{quotaExceeded && <QuotaBanner quota={quotaExceeded} />}
 					<Outlet />
 					<Toaster />
 				</SidebarInset>

@@ -79,6 +79,7 @@ func (app *Config) ensureIndexes() error {
 		{"api keys", app.Models.EnsureAPIKeyIndexes},
 		{"users", app.Models.EnsureUserIndexes},
 		{"organizations", app.Models.EnsureOrganizationIndexes},
+		{"usage", app.Models.EnsureUsageIndexes},
 	} {
 		if err := ensure.fn(); err != nil {
 			log.Printf("Startup: FAILED to ensure %s indexes, will retry: %v", ensure.name, err)

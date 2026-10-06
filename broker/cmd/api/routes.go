@@ -16,7 +16,7 @@ func (app *Config) routes() http.Handler {
 		AllowedOrigins:   []string{"https://*", "http://*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Internal-Secret", "X-User-ID", "X-User-Login"},
-		ExposedHeaders:   []string{"Link"},
+		ExposedHeaders:   []string{"Link", "Retry-After"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -70,6 +70,7 @@ func (app *Config) routes() http.Handler {
 		r.With(orgAdmin).Patch("/organizations/{id}", app.UpdateOrganization)
 		r.With(orgMember).Post("/organizations/{id}/projects", app.CreateOrganizationProject)
 		r.With(orgMember).Get("/organizations/{id}/plan", app.GetOrganizationPlan)
+		r.With(orgAdmin).Get("/organizations/{id}/usage", app.GetOrganizationUsage)
 		r.With(orgMember).Get("/organizations/{id}/members", app.ListOrganizationMembers)
 		r.With(orgAdmin).Post("/organizations/{id}/members", app.AddOrganizationMember)
 		r.With(orgAdmin).Patch("/organizations/{id}/members/{memberID}", app.UpdateOrganizationMemberRole)

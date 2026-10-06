@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
+
+	"logwolf-toolbox/data"
 )
 
 // Provider answers the questions a hosted plan would limit. Project ids are
@@ -22,8 +25,10 @@ type Provider interface {
 	// organization's.
 	Plan(ctx context.Context, projectID string) (Plan, error)
 
-	// AllowIngest reports whether the project may ingest n more events.
-	AllowIngest(ctx context.Context, projectID string, n int) (bool, error)
+	// MonthlyQuota returns the monthly event quota the project's events count
+	// toward, its organization's, and how much of it the month has used. A
+	// Quota whose Limit is Unlimited holds the project to nothing.
+	MonthlyQuota(ctx context.Context, projectID string) (Quota, error)
 
 	// RetentionChoices lists the retention values, in days, the project may
 	// pick, in the order the dashboard shows them: its plan's
@@ -44,6 +49,34 @@ type Provider interface {
 // the Provider supplies it, since only the logger can read organizations.
 type PlanLookup func(ctx context.Context, projectID string) (string, error)
 
+// QuotaLookup returns the organization a project is in, the name of its plan,
+// and the events it has ingested this month (data.Models.ProjectQuota). The
+// hosted edition's Provider builds a project's Quota from it.
+type QuotaLookup func(ctx context.Context, projectID string) (data.ProjectQuota, error)
+
+// Lookups are what the hosted edition's Provider asks the logger through.
+// Self-hosted needs neither.
+type Lookups struct {
+	Plan  PlanLookup
+	Quota QuotaLookup
+}
+
+// Quota is a monthly event quota: how many events the organization OrganizationID
+// may ingest in Month, and how many it has.
+type Quota struct {
+	// OrganizationID is the hex id of the organization whose projects share
+	// the quota; empty when there is none.
+	OrganizationID string
+	// Limit is the plan's MonthlyEvents; Unlimited sets none.
+	Limit int64
+	// Month is the first instant of the calendar month, in UTC
+	// (data.UsageMonth).
+	Month time.Time
+	// Used is the events the organization's projects have ingested in Month,
+	// as far as the brokers have flushed them.
+	Used int64
+}
+
 // Editions LOGWOLF_EDITION may name.
 const (
 	EditionSelfHosted = "selfhosted"
@@ -61,26 +94,29 @@ func EditionFromEnv() string {
 }
 
 // ForEdition returns the Provider of an edition. The cloud edition resolves each
-// project's plan with planOf, and is refused without one rather than run with
-// self-hosted limits, as is any name it does not know. Self-hosted ignores
-// planOf.
-func ForEdition(edition string, planOf PlanLookup) (Provider, error) {
+// project's plan and quota through lookups, and is refused without either
+// rather than run with self-hosted limits, as is any name it does not know.
+// Self-hosted ignores lookups.
+func ForEdition(edition string, lookups Lookups) (Provider, error) {
 	switch edition {
 	case EditionSelfHosted:
 		return SelfHosted{}, nil
 	case EditionCloud:
-		if planOf == nil {
+		if lookups.Plan == nil {
 			return nil, fmt.Errorf("LOGWOLF_EDITION=%s: no way to look up a project's plan", edition)
 		}
-		return Organizations{PlanOf: planOf}, nil
+		if lookups.Quota == nil {
+			return nil, fmt.Errorf("LOGWOLF_EDITION=%s: no way to look up a project's quota", edition)
+		}
+		return Organizations{PlanOf: lookups.Plan, QuotaOf: lookups.Quota}, nil
 	default:
 		return nil, fmt.Errorf("LOGWOLF_EDITION=%s: unknown edition, want %s or %s", edition, EditionSelfHosted, EditionCloud)
 	}
 }
 
-// FromEnv is ForEdition(EditionFromEnv(), planOf).
-func FromEnv(planOf PlanLookup) (Provider, error) {
-	return ForEdition(EditionFromEnv(), planOf)
+// FromEnv is ForEdition(EditionFromEnv(), lookups).
+func FromEnv(lookups Lookups) (Provider, error) {
+	return ForEdition(EditionFromEnv(), lookups)
 }
 
 // SelfHosted is the Provider of a self-hosted install: every project is on
@@ -92,9 +128,10 @@ func (SelfHosted) Plan(context.Context, string) (Plan, error) {
 	return SelfHostedPlan(), nil
 }
 
-// AllowIngest always allows: a self-hosted install has no quota.
-func (SelfHosted) AllowIngest(context.Context, string, int) (bool, error) {
-	return true, nil
+// MonthlyQuota sets no limit, and asks nothing: a self-hosted install has no
+// quota.
+func (SelfHosted) MonthlyQuota(context.Context, string) (Quota, error) {
+	return Quota{Limit: Unlimited}, nil
 }
 
 // RetentionChoices offers every supported retention to every project.
@@ -114,9 +151,11 @@ func (SelfHosted) NewOrganizationPlan() Plan {
 }
 
 // Organizations is the hosted edition's Provider: a project's limits are those
-// of its organization's plan, which PlanOf names.
+// of its organization's plan, which PlanOf names. QuotaOf tells how much of the
+// plan's monthly events the organization has used.
 type Organizations struct {
-	PlanOf PlanLookup
+	PlanOf  PlanLookup
+	QuotaOf QuotaLookup
 }
 
 // Plan looks up the plan of the project's organization. A plan name that is not
@@ -149,10 +188,19 @@ func (Organizations) NewOrganizationPlan() Plan {
 	return plans[PlanFree]
 }
 
-// AllowIngest allows every event for now: events are not counted yet, so there
-// is nothing to hold against the plan's MonthlyEvents.
-func (Organizations) AllowIngest(context.Context, string, int) (bool, error) {
-	return true, nil
+// MonthlyQuota is the plan's MonthlyEvents for the project's organization, with
+// the events it has ingested this month. A plan name that is not in the table
+// is an error, not a quota without a limit.
+func (o Organizations) MonthlyQuota(ctx context.Context, projectID string) (Quota, error) {
+	q, err := o.QuotaOf(ctx, projectID)
+	if err != nil {
+		return Quota{}, fmt.Errorf("quota of project %s: %w", projectID, err)
+	}
+	p, err := o.OrganizationPlan(q.Plan)
+	if err != nil {
+		return Quota{}, fmt.Errorf("quota of project %s: %w", projectID, err)
+	}
+	return Quota{OrganizationID: q.OrganizationID, Limit: p.MonthlyEvents, Month: q.Month, Used: q.Events}, nil
 }
 
 // RetentionChoices are those of the project's plan.

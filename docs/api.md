@@ -44,6 +44,21 @@ The key decides the project, so no request names one. A key has scopes, picked w
 | `403`  | The key lacks the route's scope                                                                |
 | `429`  | This address failed to authenticate 10 times within a minute; every request is refused until the minute is up |
 
+Ingestion is also rate-limited per key, by the plan of the key's project. Each key has a bucket of events that refills at a steady rate, and each event takes one. A `POST /logs` or `POST /logs/batch` whose events do not fit gets a `429`, and none of its events are queued. A batch larger than the bucket goes through once the bucket is full, and empties it. Self-hosted installs set no rate.
+
+Each organization may also ingest a number of events per calendar month (UTC), set by its plan and shared by all its projects; events sent from the dashboard count too. Once they are used up, `POST /logs` and `POST /logs/batch` get a `429` until the month is over, and none of the request's events are queued. A batch that would go past the quota is refused whole, even if part of it would fit. The dashboard shows an organization over its quota on every page. Self-hosted installs set no quota. With more than one broker the quota is held a little loosely: an organization may go past it by about a minute of ingestion per broker.
+
+Every `429` carries `Retry-After`, the whole seconds until the request would be accepted. Wait that long, then retry. Its body's `code` says which limit refused it:
+
+| `code`           | Means                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------- |
+| `rate_limited`   | Too many failed authentications from this address, or the key's events are past its rate. Seconds away  |
+| `quota_exceeded` | The organization has used its monthly events. `Retry-After` is the end of the month; don't retry before |
+
+```json
+{ "error": true, "message": "the organization of this project has used its monthly event quota", "code": "quota_exceeded" }
+```
+
 ## Responses
 
 Responses are JSON envelopes. `error` says whether the request failed and `message` describes the outcome for people; on success, `data` holds the result:
@@ -60,7 +75,7 @@ Go by the status code rather than the message, whose wording may change. Besides
 | `400`  | The body or the query is malformed, or an event's severity is not `info`, `warning`, `error` or `critical` |
 | `404`  | `GET /logs/{id}`: no event of the key's project has that id                                            |
 | `413`  | `POST /logs/batch`: more than 1000 events                                                              |
-| `500`  | The key could not be checked, or the logger could not be reached. Retry                                |
+| `500`  | The key, or the plan that sets its ingestion rate or monthly quota, could not be checked, or the logger could not be reached. Retry |
 | `503`  | RabbitMQ did not confirm the events, so they may not be stored. Retry                                  |
 
 Delivery is at least once: a batch retried after a `503` may store some of its events twice.

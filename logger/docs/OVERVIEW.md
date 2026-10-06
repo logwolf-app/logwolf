@@ -14,6 +14,7 @@ cmd/api/
 ├── main.go     # MongoDB setup, indexes, startup migration, dual-server startup, graceful shutdown
 ├── migrate.go  # Startup migration: pre-multi-tenancy data into the Default project, projects into the Default organization
 ├── cleanup.go  # Background per-project retention cleanup loop, plus the sweep of deleted projects' logs
+├── storage.go  # Background job measuring each project's storage into the usage collection
 ├── projects.go # Short-lived cache of project ids known to exist, used by LogInfo
 ├── startup.go  # Startup passes (indexes + migration), background retries, the state /health reports
 ├── routes.go   # HTTP route handlers (/ping, /health)
@@ -68,12 +69,20 @@ Organizations sit above projects and hold the plan. Their members are always use
 | `RPCServer.ListUserOrganizations`        | `RPCUserOrganizationsArgs`            | `[]UserOrganization`   | A user's organizations, each with their role, oldest first                        |
 | `RPCServer.OrganizationAccess`           | `RPCOrganizationAccessArgs`           | `OrganizationAccess`   | Whether the organization exists, and the caller's role in it (empty for none)     |
 | `RPCServer.ListOrganizationMembers`      | `RPCOrganizationIDArgs`               | `[]OrganizationMember` | The members, under the login of their last sign-in where there is one             |
-| `RPCServer.OrganizationUsage`            | `RPCOrganizationIDArgs`               | `OrganizationUsage`    | How many projects and members the organization has, against its plan's limits     |
+| `RPCServer.OrganizationUsage`            | `RPCOrganizationIDArgs`               | `OrganizationUsage`    | Its projects, members and events this month, against its plan's limits            |
+| `RPCServer.OrganizationProjectsUsage`    | `RPCOrganizationIDArgs`               | `OrganizationProjectsUsage` | Each project's events, bytes and storage this month; deleted projects' apart |
 | `RPCServer.AddOrganizationMember`        | `RPCAddOrganizationMemberArgs`        | `string`               | Add a user; a second membership of one user is a duplicate key error              |
 | `RPCServer.RemoveOrganizationMember`     | `RPCRemoveOrganizationMemberArgs`     | `string`               | Remove a membership by its id; never the last owner (`ErrLastOrganizationOwner`)  |
 | `RPCServer.UpdateOrganizationMemberRole` | `RPCUpdateOrganizationMemberRoleArgs` | `string`               | Change a membership's role; never demotes the last owner                          |
 
 `RemoveOrganizationMember` and `UpdateOrganizationMemberRole` carry the `ActorRole` of whoever makes the change, which the Broker takes from its access check: anyone but an owner is refused a change that removes, demotes or promotes an owner (`ErrOwnerRequired`).
+
+Usage is metered here too (see [Usage](#usage)):
+
+| Method                   | Input                | Output         | Description                                                                          |
+| ------------------------ | -------------------- | -------------- | ------------------------------------------------------------------------------------ |
+| `RPCServer.RecordUsage`  | `RPCRecordUsageArgs` | `string`       | Store a Broker's running totals of accepted events and bytes, per project and hour   |
+| `RPCServer.ProjectQuota` | `RPCProjectIDArgs`   | `ProjectQuota` | A project's organization, its plan, and its events this month, for the monthly quota |
 
 A malformed organization id is an `invalid organization ID` error, for the Broker to answer as 404, like a project's; a malformed member id is an `invalid member ID` error. `CreateOrganization` refuses an organization without a name or a plan (`ErrInvalidOrganization`) or without an owner (`ErrInvalidUser`); `AddOrganizationMember` refuses a member without a positive GitHub user ID or a login (`ErrInvalidUser`), and every member method refuses a role that is not an organization role.
 
@@ -122,6 +131,14 @@ Deleting a project also does not stop every event already addressed to it: the B
 - Each cleanup pass also deletes logs whose `project_id` names no project (`DeleteOrphanedLogs`). That catches an event that passed the check just before its project was deleted, or one accepted by another Logger instance whose cache has not expired. It deletes in batches too, with a timeout per batch rather than per pass, so a big deleted project is not cut off every time. Logs with no `project_id`, or an empty one, are left for the startup migration.
 
 Pre-multi-tenancy builds enforced retention with a single global TTL index on `logs.created_at`. That index is dropped on startup — left in place it would keep expiring logs on the old global schedule, overriding whatever each project now has configured.
+
+## Usage
+
+The `usage` collection holds what each project uses, in hourly buckets: one document per project, hour (`hour`, the start of the hour in UTC) and source (`source`). It has a retention of its own, `data.UsageRetention` (400 days), on a TTL index on `hour`, so usage outlives the logs it counts, however short the project's retention, and outlives a deleted project too.
+
+- **Accepted events.** Each Broker run is a source. `RecordUsage` stores its running totals for each project and hour (`events`, `bytes`), keeping the larger of the stored value and the one sent (`$max`), so a retried flush, or one sent twice, changes nothing. A count under a malformed project id is dropped, not refused, so the Broker does not retry it forever. A project's usage over a window is the sum over its sources (`data.GetProjectUsage`).
+- **Organizations.** Each Broker bucket also names the organization its project is in when the flush arrives (`organization_id`; one whose project is gone keeps the one it named). An organization's events over a window add up its buckets, deleted projects' included (`data.GetOrganizationEvents`, on the `(organization_id, hour)` index), so deleting a project does not give back its share of the monthly quota. `ProjectQuota` answers it for the calendar month (UTC) under way, with the organization and its plan; `OrganizationUsage` includes it as `events`, and `OrganizationProjectsUsage` itemizes it by project, with each project's last storage measure (`data.GetOrganizationProjectsUsage`).
+- **Storage.** A background job (`storage.go`) measures every project every `STORAGE_METER_INTERVAL` (1 hour), and once at start: how many logs it stores and their size as BSON documents (`data.MeasureProjectStorage`, the logical size, before compression and without indexes). It writes them to the project's bucket for the hour under the source `storage` (`stored_events`, `stored_bytes`, `measured_at`); a later measure in the same hour replaces it. Each project gets a two-minute timeout of its own, like the retention cleanup, and one that fails or runs out keeps its last measure. The job starts with the retention cleanup, once every `project_id` is an ObjectID.
 
 ## Startup migration
 
@@ -173,6 +190,7 @@ The HTTP server has a 15-second shutdown timeout. The RPC server closes its TCP 
 | `LOGGER_RPC_PORT`                | `5001`                  | TCP port for the RPC server                                                               |
 | `LOGGER_HTTP_PORT`               | `80`                    | HTTP port for health checks                                                               |
 | `CLEANUP_INTERVAL`               | `1h`                    | How often the per-project retention cleanup (and the deleted-project sweep) runs          |
+| `STORAGE_METER_INTERVAL`         | `1h`                    | How often each project's storage is measured into the `usage` collection                 |
 | `LOGWOLF_ALLOWED_GITHUB_USERS`   | —                       | Comma-separated logins made owners of `Default` by the startup migration                  |
 | `LOGWOLF_DEFAULT_PROJECT_OWNERS` | —                       | More comma-separated owners of `Default`, for org-only deployments; merged with the above |
 

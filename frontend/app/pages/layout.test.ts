@@ -30,6 +30,7 @@ type LayoutData = {
 	data: {
 		currentProject?: { id: string };
 		currentOrganization?: { id: string };
+		quotaExceeded: { organizationId: string; monthlyEvents: number; renewsAt: string } | null;
 		projects: unknown[];
 		organizations: unknown[];
 		csrfToken: string;
@@ -178,6 +179,56 @@ describe('layout loader', () => {
 			const res = (await load('/projects/new', await sessionCookie({ currentOrganizationID: acme }))) as LayoutData;
 			expect(res.data.currentOrganization?.id).toBe(acme);
 			expect(res.data.currentProject).toBeUndefined();
+		});
+	});
+
+	describe('monthly quota', () => {
+		const usage = (events: number) => ({
+			plan: { name: 'free', monthly_events: 100, max_retention_days: 30, max_projects: 3, max_members: 3 },
+			usage: { projects: 1, members: 1, events },
+		});
+		let api: ReturnType<typeof fakeApi>;
+
+		beforeEach(() => {
+			organizations = [{ ...organization(acme), plan: 'free' }, organization(globex)];
+			projects = [project(alpha, 'owner', 'Alpha', acme), project(beta, 'owner', 'Beta', globex)];
+			api = fakeApi({ getProjects: async () => projects, getOrganizations: async () => organizations });
+			vi.mocked(createApi).mockReturnValue(api);
+		});
+
+		const loadIn = async (organizationId: string, projectId: string) =>
+			(await load(
+				'/dashboard',
+				await sessionCookie({ currentProjectID: projectId, currentOrganizationID: organizationId }),
+			)) as LayoutData;
+
+		it('tells every page when the current organization has used its monthly events', async () => {
+			api.getOrganizationPlan.mockResolvedValue(usage(100));
+
+			const res = await loadIn(acme, alpha);
+
+			expect(api.getOrganizationPlan).toHaveBeenCalledWith(acme);
+			expect(res.data.quotaExceeded).toMatchObject({ organizationId: acme, monthlyEvents: 100 });
+			expect(new Date(res.data.quotaExceeded!.renewsAt).getUTCDate()).toBe(1);
+		});
+
+		it('says nothing while the organization has events left', async () => {
+			api.getOrganizationPlan.mockResolvedValue(usage(99));
+
+			expect((await loadIn(acme, alpha)).data.quotaExceeded).toBeNull();
+		});
+
+		it('does not ask about the self-hosted plan, which limits nothing', async () => {
+			const res = await loadIn(globex, beta);
+
+			expect(api.getOrganizationPlan).not.toHaveBeenCalled();
+			expect(res.data.quotaExceeded).toBeNull();
+		});
+
+		it('renders the page without the banner when the plan cannot be read', async () => {
+			api.getOrganizationPlan.mockRejectedValue(new Error('broker down'));
+
+			expect((await loadIn(acme, alpha)).data.quotaExceeded).toBeNull();
 		});
 	});
 });

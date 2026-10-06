@@ -502,6 +502,27 @@ func (r *RPCServer) ProjectPlan(args *data.RPCProjectIDArgs, reply *string) erro
 	return nil
 }
 
+// ProjectQuota answers what the project's events are held to under the monthly
+// event quota (data.ProjectQuota): its organization, that organization's plan,
+// and the events the organization has ingested this month. The hosted
+// edition's limits.Provider builds the project's quota from it.
+func (r *RPCServer) ProjectQuota(args *data.RPCProjectIDArgs, reply *data.ProjectQuota) error {
+	id, err := parseProjectID("ProjectQuota", args.ID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	quota, err := r.models.ProjectQuota(ctx, id, time.Now())
+	if err != nil {
+		log.Println("Error getting project quota:", err)
+		return err
+	}
+	*reply = quota
+	return nil
+}
+
 // UpdateOrganization renames an organization. Its plan is not changed here.
 func (r *RPCServer) UpdateOrganization(args *data.RPCUpdateOrganizationArgs, reply *data.Organization) error {
 	log.Printf("Renaming organization: %s", args.ID)
@@ -572,7 +593,7 @@ func (r *RPCServer) ListOrganizationMembers(args *data.RPCOrganizationIDArgs, re
 }
 
 // OrganizationUsage counts what the organization has of what its plan limits:
-// its projects and members.
+// its projects, its members and its events this month.
 func (r *RPCServer) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *data.OrganizationUsage) error {
 	orgID, err := parseOrganizationID("OrganizationUsage", args.ID)
 	if err != nil {
@@ -587,6 +608,55 @@ func (r *RPCServer) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *d
 		return err
 	}
 	*reply = usage
+	return nil
+}
+
+// OrganizationProjectsUsage adds up what each of the organization's projects
+// used this calendar month (UTC): its events and bytes, and its storage as last
+// measured. The events of its deleted projects are added up apart.
+func (r *RPCServer) OrganizationProjectsUsage(args *data.RPCOrganizationIDArgs, reply *data.OrganizationProjectsUsage) error {
+	orgID, err := parseOrganizationID("OrganizationProjectsUsage", args.ID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	month := data.UsageMonth(time.Now())
+	usage, err := r.models.GetOrganizationProjectsUsage(ctx, orgID, month, data.NextUsageMonth(month))
+	if err != nil {
+		log.Println("Error adding up organization usage by project:", err)
+		return err
+	}
+	*reply = usage
+	return nil
+}
+
+// RecordUsage stores a broker's running totals of the events it accepted, per
+// project and hour (see data.RecordUsage). The totals replace what the broker
+// sent before rather than adding to it, so a retried flush counts nothing twice.
+//
+// A count under a malformed project id is dropped, not refused: the broker
+// counts only projects it has checked, and refusing would have it retry the
+// same count forever. A project that has been deleted keeps its usage.
+func (r *RPCServer) RecordUsage(args *data.RPCRecordUsageArgs, reply *string) error {
+	counts := make([]data.UsageCount, 0, len(args.Counts))
+	for _, c := range args.Counts {
+		id, err := parseProjectID("RecordUsage", c.ProjectID)
+		if err != nil {
+			log.Printf("Dropping usage of %d events from %s: %v", c.Events, args.Source, err)
+			continue
+		}
+		counts = append(counts, data.UsageCount{ProjectID: id, Hour: c.Hour, Events: c.Events, Bytes: c.Bytes})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.models.RecordUsage(ctx, args.Source, counts); err != nil {
+		log.Println("Error recording usage:", err)
+		return err
+	}
+	*reply = "OK"
 	return nil
 }
 

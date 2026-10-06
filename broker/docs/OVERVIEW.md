@@ -19,6 +19,9 @@ cmd/api/
 ├── access.go        # Project access: authorizeProject, requireProject
 ├── organizations.go # Organization access (requireOrganization) and routes
 ├── clientip.go      # Client address behind trusted proxies (TRUSTED_PROXIES)
+├── ingestlimit.go   # Per-API-key ingestion rate (token buckets)
+├── quota.go         # Monthly event quota, a counter per organization
+├── usage.go         # Usage metering: accepted events and bytes, flushed to the logger
 ├── rpcerrors.go     # Maps the logger's RPC errors to HTTP statuses
 └── helpers.go       # JSON read/write utilities
 ```
@@ -76,6 +79,7 @@ Everything that acts on one project is under `/projects/{id}`, and on one organi
 | `PATCH`  | `/organizations/{id}`                    | admin  | Rename an organization (the plan stays)                            |
 | `POST`   | `/organizations/{id}/projects`           | member | Create a project in the organization, owned by the caller          |
 | `GET`    | `/organizations/{id}/plan`               | member | The plan's limits and the organization's usage (below)             |
+| `GET`    | `/organizations/{id}/usage`              | admin  | This month's usage of each project in the organization (below)     |
 | `GET`    | `/organizations/{id}/members`            | member | List members                                                       |
 | `POST`   | `/organizations/{id}/members`            | admin  | Add a member: `{"login", "user_id", "role"}`; an owner, owner-only |
 | `PATCH`  | `/organizations/{id}/members/{memberID}` | admin  | Change a member's `role`; to or from owner, owner-only             |
@@ -120,7 +124,9 @@ Organization routes deny the same way (`organizations.go`): **404** if the organ
 
 Admins manage an organization's members, but only owners decide who the owners are: an admin adding an owner is refused with a 403 before the logger is called, and an admin removing, demoting or promoting an owner is refused by the logger (`data.ErrOwnerRequired`, 403), which reads the member's role in the same transaction as the change; the handler passes the caller's role from the access check as `ActorRole`. An organization always keeps one owner, like a project (400).
 
-A new organization starts on the plan the edition picks (`limits.Provider.NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted), never one from the request. `GET /organizations/{id}/plan` answers `{"plan": {"name", "monthly_events", "max_retention_days", "max_projects", "max_members"}, "usage": {"projects", "members"}}`, the plan resolved by the edition from the name the organization stores (`OrganizationPlan`: self-hosted is always the one unlimited plan; hosted, a name not in the table is a 500, never a plan without limits). A limit of 0 is none. Events are not counted yet, so usage has no events.
+A new organization starts on the plan the edition picks (`limits.Provider.NewOrganizationPlan`: `selfhosted` self-hosted, `free` hosted), never one from the request. `GET /organizations/{id}/plan` answers `{"plan": {"name", "monthly_events", "max_retention_days", "max_projects", "max_members"}, "usage": {"projects", "members", "events"}}`, the plan resolved by the edition from the name the organization stores (`OrganizationPlan`: self-hosted is always the one unlimited plan; hosted, a name not in the table is a 500, never a plan without limits). A limit of 0 is none. `usage.events` is what the organization's projects ingested this calendar month (UTC), as far as the brokers have flushed it; the dashboard compares it with `monthly_events` to show an organization over its quota.
+
+`GET /organizations/{id}/usage` itemizes that month by project (`RPCServer.OrganizationProjectsUsage`): `{"month", "projects": [{"project_id", "name", "events", "bytes", "storage": {"events", "bytes"}, "storage_measured_at"}], "deleted": {"events", "bytes"}}`. Every project in the organization has a line, the most events first; `storage` is the logger's last measure of its stored logs, and `storage_measured_at` the zero time while there is none. `deleted` adds up projects deleted since, whose events still count toward the quota, so the lines add up to `usage.events`. It names projects the caller may not be a member of, so it is for admins and owners.
 
 Creating a project is one logger call, `POST /projects` and
 `POST /organizations/{id}/projects` alike (`{"name", "slug"}`; the second
@@ -206,6 +212,14 @@ A 202 means RabbitMQ holds the event on disk (`event.Emitter`, `events.go`):
 - **The broker declares the queue** and its `log.*` binding at start, as the listener does. The exchange drops what no queue is bound for, so before, events sent before the listener had first run went nowhere.
 - **Reconnects:** the emitter dials RabbitMQ again once its connection has closed, as it does when RabbitMQ restarts. The request that finds it closed tries once; `/health` reconnects too.
 
+**Monthly quota** (`quota.go`): every request's events, the dashboard's included since they count too, are first held to the monthly event quota of their project's organization: the plan's `MonthlyEvents`, shared by its projects, per calendar month (UTC). The broker keeps a counter per organization: what the logger had counted for the month at the last lookup (`limits.Provider.MonthlyQuota`, `RPCServer.ProjectQuota` on the hosted edition), plus what this broker has accepted since. Events that would take it past the limit are a **429** with `"code": "quota_exceeded"` and a `Retry-After` until the month is over, and nothing of the request is queued; a batch that does not fit is refused whole. A project's quota is asked again after `quotaTTL` (1 minute); one that cannot be looked up before the broker has any is a **500**, and one it has stays until a lookup succeeds. A lookup never lowers the counter within a month, and the counter renews when the month turns, lookup or not. Events counted but then not queued (refused by the rate, or not confirmed) are given back. The counter can trail what the organization ingested, never lead it: with one broker it holds exactly, and with more each misses what the others have not flushed, so an organization can pass its quota by about `USAGE_FLUSH_INTERVAL` of ingestion per other broker. Projects idle for 10 minutes are swept with the auth caches, and with them the counters no project points to. Self-hosted has no quota and looks nothing up.
+
+**Ingestion rate** (`ingestlimit.go`): events sent with an API key are then held to the key's rate. Each key has a token bucket sized from the plan of its project (`limits.Plan.IngestRate`, events a second, and `IngestBurst`, what the bucket holds). Each event takes a token. A request whose events do not fit is a **429** with `"code": "rate_limited"` and `Retry-After` (seconds until they would, rounded up), and nothing of it is queued; a batch larger than the bucket needs a full one, and empties it. The plan is asked once per key and again after `ingestPlanTTL` (1 minute), so a plan change reaches a busy key within it; a key whose plan cannot be looked up before it has a bucket gets a **500**, and one that has a bucket keeps its size. Self-hosted plans set no rate. Events from the dashboard (`POST /projects/{id}/logs`) carry no key and are not limited. The buckets are this broker's own, capped at 10,000, and swept with the auth caches once full and idle; with more than one replica each holds a key to the rate separately, until they move to shared storage. The per-IP 429 sends `Retry-After` too, the rest of its window, and the code `rate_limited`: a client tells the limits that clear within seconds from the quota by the body's `code`.
+
+**Usage metering** (`usage.go`): once RabbitMQ has confirmed a request's events, they are counted against their project: one per event, and the size of its queued message as its bytes. That is every event the broker answers **202** for, the dashboard's included, and none it refuses or cannot queue. The counts are kept in memory per project per hour, and flushed to the logger (`RPCServer.RecordUsage`) every `USAGE_FLUSH_INTERVAL` (1 minute), and once more on shutdown, after the last request has drained. A flush sends the running totals of the hours that changed since the last successful one, under a source naming this broker run (host and a random suffix); the logger keeps the larger of what it has and what it is sent, so a failed flush is simply sent again by the next, and one whose reply was lost counts nothing twice. Hours that are over are forgotten once the logger has them.
+
+The loss window: a broker that is killed or crashes loses what it counted since its last flush, at most `USAGE_FLUSH_INTERVAL` of events. One stopped cleanly loses nothing, unless the logger cannot be reached for the final flush. A restarted broker is a new source, so what the previous run flushed stays counted, and the new run's counts add to it.
+
 Every event's severity is normalized before anything is published (`data.NormalizeSeverity`): trimmed and lower-cased, so `ERROR` is stored as `error`, which is what the metrics count. A severity that is not `info`, `warning`, `error` or `critical`, a missing one included, is a **400** naming it (`event N: …` within a batch), and nothing of the request is queued. Events stored before this keep the casing they were sent with; they are not migrated.
 
 Events are published to the `logs_topic` exchange with routing key `log.<severity>` (`data.SeverityRoutingKey`): `log.info`, `log.warning`, `log.error` or `log.critical`. A batch publishes each event under its own. The broker has no MongoDB client at all: API keys, like everything else it stores or reads, go through the logger's RPC methods.
@@ -219,14 +233,15 @@ Dashboard → GET /projects/{id}/logs     → requireProject      → RPC call t
 
 ## Environment variables
 
-| Variable              | Default                       | Description                    |
-| --------------------- | ----------------------------- | ------------------------------ |
-| `RABBITMQ_URL`        | `amqp://guest:guest@rabbitmq` | RabbitMQ connection string     |
-| `BROKER_PORT`         | `80`                          | HTTP listen port               |
-| `LOGGER_RPC_ADDR`     | `logger:5001`                 | Logger RPC address             |
-| `INTERNAL_API_SECRET` | —                             | Shared secret for dashboard    |
-| `TRUSTED_PROXIES`     | — (trust no one)              | See below                      |
-| `LOGWOLF_EDITION`     | `selfhosted`                  | Picks the `limits.Provider`    |
+| Variable               | Default                       | Description                 |
+| ---------------------- | ----------------------------- | --------------------------- |
+| `RABBITMQ_URL`         | `amqp://guest:guest@rabbitmq` | RabbitMQ connection string  |
+| `BROKER_PORT`          | `80`                          | HTTP listen port            |
+| `LOGGER_RPC_ADDR`      | `logger:5001`                 | Logger RPC address          |
+| `INTERNAL_API_SECRET`  | —                             | Shared secret for dashboard |
+| `TRUSTED_PROXIES`      | — (trust no one)              | See below                   |
+| `LOGWOLF_EDITION`      | `selfhosted`                  | Picks the `limits.Provider` |
+| `USAGE_FLUSH_INTERVAL` | `1m`                          | How often usage is flushed  |
 
 `TRUSTED_PROXIES` is a comma-separated list of IPs and CIDR ranges. A request from one of them is attributed to the right-most `X-Forwarded-For` entry that is not itself trusted (`clientIP` in `clientip.go`); any other request is attributed to its peer address, and its `X-Forwarded-For` is ignored. The failed-auth rate limiter counts per that address. Behind Caddy it must cover Caddy, or every internet client shares Caddy's counter and ten bad keys from anyone lock out all SDK clients for a minute. `docker-compose.yml` trusts the private ranges, which is safe only while the broker publishes no port. An entry that is not an IP or range stops the broker at start.
 

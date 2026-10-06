@@ -20,6 +20,13 @@ func resetAuthCaches(t *testing.T) {
 		ipLimiterMu.Lock()
 		clear(ipLimiter)
 		ipLimiterMu.Unlock()
+		ingestBucketsMu.Lock()
+		clear(ingestBuckets)
+		ingestBucketsMu.Unlock()
+		quotaMu.Lock()
+		clear(quotaProjects)
+		clear(quotaCounters)
+		quotaMu.Unlock()
 	}
 	reset()
 	t.Cleanup(reset)

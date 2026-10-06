@@ -28,6 +28,10 @@ type Config struct {
 
 	// Limits is what the edition lets a project do (see limitsProvider).
 	Limits limits.Provider
+
+	// Usage counts the events the broker accepts, per project per hour (see
+	// usageMeter). Nil counts nothing.
+	Usage *usageMeter
 }
 
 // limitsProvider is app.Limits, or self-hosted's when there is none: a Config
@@ -59,10 +63,13 @@ func main() {
 	}
 	defer emitter.Close()
 
+	usage := newUsageMeter(usageSource())
+
 	app := Config{
 		Events:         emitter,
 		TrustedProxies: trusted,
 		Limits:         lim,
+		Usage:          usage,
 	}
 
 	srv := &http.Server{
@@ -76,6 +83,7 @@ func main() {
 	defer stop()
 
 	go sweepAuthCachesEvery(ctx, authCacheSweepInterval)
+	go usage.run(ctx, usageFlushInterval(), recordUsage)
 
 	go func() {
 		log.Printf("Starting server on port %s\n", httpPort())
@@ -94,6 +102,9 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
+
+	// No request is left to count: flush what the last ones accepted.
+	usage.flushLogged(context.Background(), recordUsage)
 
 	log.Println("Shutdown complete.")
 }

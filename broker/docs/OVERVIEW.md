@@ -19,6 +19,8 @@ cmd/api/
 ├── access.go        # Project access: authorizeProject, requireProject
 ├── organizations.go # Organization access (requireOrganization) and routes
 ├── clientip.go      # Client address behind trusted proxies (TRUSTED_PROXIES)
+├── ingestlimit.go   # Per-API-key ingestion rate (token buckets)
+├── usage.go         # Usage metering: accepted events and bytes, flushed to the logger
 ├── rpcerrors.go     # Maps the logger's RPC errors to HTTP statuses
 └── helpers.go       # JSON read/write utilities
 ```
@@ -208,6 +210,10 @@ A 202 means RabbitMQ holds the event on disk (`event.Emitter`, `events.go`):
 
 **Ingestion rate** (`ingestlimit.go`): events sent with an API key are then held to the key's rate. Each key has a token bucket sized from the plan of its project (`limits.Plan.IngestRate`, events a second, and `IngestBurst`, what the bucket holds). Each event takes a token. A request whose events do not fit is a **429** with `Retry-After` (seconds until they would, rounded up), and nothing of it is queued; a batch larger than the bucket needs a full one, and empties it. The plan is asked once per key and again after `ingestPlanTTL` (1 minute), so a plan change reaches a busy key within it; a key whose plan cannot be looked up before it has a bucket gets a **500**, and one that has a bucket keeps its size. Self-hosted plans set no rate. Events from the dashboard (`POST /projects/{id}/logs`) carry no key and are not limited. The buckets are this broker's own, capped at 10,000, and swept with the auth caches once full and idle; with more than one replica each holds a key to the rate separately, until they move to shared storage. The per-IP 429 sends `Retry-After` too, the rest of its window.
 
+**Usage metering** (`usage.go`): once RabbitMQ has confirmed a request's events, they are counted against their project: one per event, and the size of its queued message as its bytes. That is every event the broker answers **202** for, the dashboard's included, and none it refuses or cannot queue. The counts are kept in memory per project per hour, and flushed to the logger (`RPCServer.RecordUsage`) every `USAGE_FLUSH_INTERVAL` (1 minute), and once more on shutdown, after the last request has drained. A flush sends the running totals of the hours that changed since the last successful one, under a source naming this broker run (host and a random suffix); the logger keeps the larger of what it has and what it is sent, so a failed flush is simply sent again by the next, and one whose reply was lost counts nothing twice. Hours that are over are forgotten once the logger has them.
+
+The loss window: a broker that is killed or crashes loses what it counted since its last flush, at most `USAGE_FLUSH_INTERVAL` of events. One stopped cleanly loses nothing, unless the logger cannot be reached for the final flush. A restarted broker is a new source, so what the previous run flushed stays counted, and the new run's counts add to it.
+
 Every event's severity is normalized before anything is published (`data.NormalizeSeverity`): trimmed and lower-cased, so `ERROR` is stored as `error`, which is what the metrics count. A severity that is not `info`, `warning`, `error` or `critical`, a missing one included, is a **400** naming it (`event N: …` within a batch), and nothing of the request is queued. Events stored before this keep the casing they were sent with; they are not migrated.
 
 Events are published to the `logs_topic` exchange with routing key `log.<severity>` (`data.SeverityRoutingKey`): `log.info`, `log.warning`, `log.error` or `log.critical`. A batch publishes each event under its own. The broker has no MongoDB client at all: API keys, like everything else it stores or reads, go through the logger's RPC methods.
@@ -221,14 +227,15 @@ Dashboard → GET /projects/{id}/logs     → requireProject      → RPC call t
 
 ## Environment variables
 
-| Variable              | Default                       | Description                    |
-| --------------------- | ----------------------------- | ------------------------------ |
-| `RABBITMQ_URL`        | `amqp://guest:guest@rabbitmq` | RabbitMQ connection string     |
-| `BROKER_PORT`         | `80`                          | HTTP listen port               |
-| `LOGGER_RPC_ADDR`     | `logger:5001`                 | Logger RPC address             |
-| `INTERNAL_API_SECRET` | —                             | Shared secret for dashboard    |
-| `TRUSTED_PROXIES`     | — (trust no one)              | See below                      |
-| `LOGWOLF_EDITION`     | `selfhosted`                  | Picks the `limits.Provider`    |
+| Variable               | Default                       | Description                 |
+| ---------------------- | ----------------------------- | --------------------------- |
+| `RABBITMQ_URL`         | `amqp://guest:guest@rabbitmq` | RabbitMQ connection string  |
+| `BROKER_PORT`          | `80`                          | HTTP listen port            |
+| `LOGGER_RPC_ADDR`      | `logger:5001`                 | Logger RPC address          |
+| `INTERNAL_API_SECRET`  | —                             | Shared secret for dashboard |
+| `TRUSTED_PROXIES`      | — (trust no one)              | See below                   |
+| `LOGWOLF_EDITION`      | `selfhosted`                  | Picks the `limits.Provider` |
+| `USAGE_FLUSH_INTERVAL` | `1m`                          | How often usage is flushed  |
 
 `TRUSTED_PROXIES` is a comma-separated list of IPs and CIDR ranges. A request from one of them is attributed to the right-most `X-Forwarded-For` entry that is not itself trusted (`clientIP` in `clientip.go`); any other request is attributed to its peer address, and its `X-Forwarded-For` is ignored. The failed-auth rate limiter counts per that address. Behind Caddy it must cover Caddy, or every internet client shares Caddy's counter and ten bad keys from anyone lock out all SDK clients for a minute. `docker-compose.yml` trusts the private ranges, which is safe only while the broker publishes no port. An entry that is not an IP or range stops the broker at start.
 

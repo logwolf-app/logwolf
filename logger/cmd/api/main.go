@@ -62,8 +62,12 @@ func main() {
 	// Retention is looked up by an ObjectID project_id. A setting still stored
 	// under the old string one would be missed, and the project's logs expired on
 	// the 90-day default however long it had chosen to keep them; so the cleanup
-	// starts only once every project_id is converted.
-	runStartup(ctx, app.startup, app.runStartupTasks, func() { go app.runCleanup(ctx) })
+	// starts only once every project_id is converted. The storage job waits too,
+	// since it reads logs by an ObjectID project_id as well.
+	runStartup(ctx, app.startup, app.runStartupTasks, func() {
+		go app.runCleanup(ctx)
+		go app.runStorageMeter(ctx)
+	})
 
 	app.serve(ctx)
 }

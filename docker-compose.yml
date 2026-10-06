@@ -40,6 +40,7 @@ services:
       # no port, so only containers reach it; Caddy's address is assigned by
       # Docker, hence the private ranges.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}
+      USAGE_FLUSH_INTERVAL: ${USAGE_FLUSH_INTERVAL:-1m}
     networks:
       - public
       - internal
@@ -60,6 +61,7 @@ services:
       # Extra owners for that project; how org-only deployments get one.
       LOGWOLF_DEFAULT_PROJECT_OWNERS: ${LOGWOLF_DEFAULT_PROJECT_OWNERS:-}
       CLEANUP_INTERVAL: ${CLEANUP_INTERVAL:-1h}
+      STORAGE_METER_INTERVAL: ${STORAGE_METER_INTERVAL:-1h}
       MONGO_USERNAME: ${MONGO_USERNAME}
       MONGO_PASSWORD: ${MONGO_PASSWORD}
     networks:

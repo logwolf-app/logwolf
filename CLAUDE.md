@@ -91,6 +91,8 @@ Setting `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in `.env` (`;
 
 **Editions:** self-hosted and hosted Logwolf differ only behind two extension points, picked by `LOGWOLF_EDITION` (`selfhosted`, the default, or `cloud`, whose `SignupPolicy` is not built yet, so the frontend stops at start): `limits.Provider` (`toolbox/limits`) answers which plan's limits apply to a project, whether it may ingest more events, which retention values it may pick, which plan an organization's stored plan name is and which plan a new organization starts on, and the broker takes retention choices from it (`GET /projects/{id}/retention` returns them as `choices`, which the settings page lists); `SignupPolicy` (`frontend/app/lib/signup.server.ts`) answers whether a login may sign in. Self-hosted defaults: unlimited, every supported retention, and the allowlist. A project's limits are its organization's plan. Plans live in code (`toolbox/limits/plans.go`: monthly events, max retention, max projects, max members, per-key ingest rate and burst), not in the database, which stores only the plan's name; self-hosted has one plan, `selfhosted`, which limits nothing, and its provider never looks it up. The cloud provider (`limits.Organizations`) asks the logger for the plan of the project's organization (`RPCServer.ProjectPlan`), and a plan it does not know is an error, never unlimited. Anything edition-specific goes behind one of them, not behind `if edition == ...` checks
 
+**Usage metering:** the broker counts the events it answers `202` for (the dashboard's included) and their bytes (the queued message's size), per project per hour, in memory (`broker/cmd/api/usage.go`), and flushes them every `USAGE_FLUSH_INTERVAL` and on shutdown through `RPCServer.RecordUsage` into the `usage` collection (`toolbox/data/usage.go`): one bucket per project, hour and source, where a source is one broker run. A flush carries running totals, not increments, and the logger keeps the larger value, so retries never count twice and a failed flush is resent by the next; a killed broker loses at most one flush interval of counts, and a restarted one is a new source whose counts add to the old run's. The logger also measures each project's stored logs (count and BSON size) every `STORAGE_METER_INTERVAL` into the same collection, under the source `storage` (`logger/cmd/api/storage.go`). Buckets expire `data.UsageRetention` (400 days) after their hour, on a TTL index
+
 **Reading vs. writing:** Broker handles writes asynchronously (via RabbitMQ) and reads synchronously (via RPC to logger). Do not add direct DB calls to broker or listener. This holds for both entry points: SDK clients scoped by API key, and the dashboard scoped by project id + membership.
 
 **Project ids:** every `project_id` is stored as an ObjectID, like `projects._id`: a filter with a hex string matches nothing, silently. Services pass project ids to each other (RPC args, event payloads, JSON) as hex strings; the logger parses them once in its RPC layer, and the `data` functions take `primitive.ObjectID`. A project's `slug` is a display label fixed at creation, not unique and never used for lookups; the migrated `Default` project is found by its `default` flag.
@@ -120,7 +122,7 @@ Entry point: `cmd/api/main.go`. No external dependencies beyond toolbox. Pure co
 
 ### Logger (`logger/`)
 
-Entry point: `cmd/api/main.go`. Key files: `rpc.go`, `routes.go`, `migrate.go`, `cleanup.go`, `projects.go`.
+Entry point: `cmd/api/main.go`. Key files: `rpc.go`, `routes.go`, `migrate.go`, `cleanup.go`, `storage.go`, `projects.go`.
 
 RPC methods (Go stdlib `net/rpc`):
 
@@ -131,11 +133,12 @@ RPC methods (Go stdlib `net/rpc`):
 - `RPCServer.ValidateAPIKey`, `ListAPIKeys`, `CreateAPIKey`, `RevokeAPIKey` — API key storage for the broker; replies never carry the hash, and revoke matches the project as well as the id
 - `RPCServer.UpsertUser`, `GetUser` — the `users` collection, keyed by GitHub user ID (unique `github_id` index); the stored `github_login` is only the login at the last sign-in. An unknown user is `Found` false, not an error. `UpsertUser` also links the user's login-only memberships (`data.LinkMemberships`) and claims the organization ownerships pending for their login (`data.ClaimPendingOwnerships`); if any step fails, so does the sign-in
 - `RPCServer.ProjectPlan` — the plan name of a project's organization (`data.ProjectPlan`), for the hosted edition's `limits.Provider`
+- `RPCServer.RecordUsage` — a broker run's running totals of accepted events and bytes per project and hour (`data.RecordUsage`); a count under a malformed project id is dropped, not refused
 - `RPCServer.CreateOrganization`, `GetOrganization`, `UpdateOrganization`, `ListUserOrganizations`, `OrganizationAccess`, `ListOrganizationMembers`, `OrganizationUsage`, `AddOrganizationMember`, `RemoveOrganizationMember`, `UpdateOrganizationMemberRole` — organizations (`organizations`: `name`, `plan`, `billing_customer_id`, empty self-hosted) and their members (`organization_members`, unique on `(organization_id, user_id)`, roles `owner`/`admin`/`member`, always by user ID). Ids travel as hex strings and are `primitive.ObjectID`s in `data`, like project ids; a malformed one is `invalid organization ID`. An organization never loses its last owner (`ErrLastOrganizationOwner`, serialized like project members). Project roles are unchanged, except that an organization owner is owner of every project in it (`data.EffectiveProjectRole`). Every project belongs to one (`projects.organization_id`): `CreateProject` creates it in the `Default` organization, and refuses until the startup migration has created that
 
 ### Toolbox (`toolbox/`)
 
-Packages: `data` (Models, LogEntry, APIKey, Settings, User, Organization), `event` (emitter + consumer), `limits` (`Provider`, the edition's limits), `rabbitmq` (connection), `json` (helpers).
+Packages: `data` (Models, LogEntry, APIKey, Settings, User, Organization, usage), `event` (emitter + consumer), `limits` (`Provider`, the edition's limits), `rabbitmq` (connection), `json` (helpers).
 
 The `data.Models` struct is the sole database accessor passed between services.
 
@@ -187,6 +190,8 @@ Per-service env vars:
 | `LOGGER_RPC_PORT`                | logger           | `5001`                        | RPC listen port                                                        |
 | `LOGGER_HTTP_PORT`               | logger           | `80`                          | HTTP health check port                                                 |
 | `CLEANUP_INTERVAL`               | logger           | `1h`                          | Per-project retention cleanup frequency                                |
+| `STORAGE_METER_INTERVAL`         | logger           | `1h`                          | How often each project's storage is measured into `usage`              |
+| `USAGE_FLUSH_INTERVAL`           | broker           | `1m`                          | How often usage is flushed to the logger; what a killed broker loses   |
 | `LOGWOLF_VERSION`                | compose          | `latest`                      | Tag of the published images `docker-compose.yml` runs                  |
 | `LOGWOLF_EDITION`                | broker, frontend | `selfhosted`                  | Picks `limits.Provider` and `SignupPolicy`; `cloud` has no signup yet  |
 | `LOGWOLF_ALLOWED_GITHUB_USERS`   | frontend, logger | —                             | Dashboard allowlist; also the owners of the migrated `Default` project |

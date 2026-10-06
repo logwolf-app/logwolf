@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
@@ -36,6 +37,7 @@ type fakeLogger struct {
 	plaintext map[string]string               // plaintext key -> key id hex
 	users     map[int64]data.User             // GitHub user ID -> user
 	plans     map[string]string               // project id hex -> its organization's plan
+	monthUsed map[string]int64                // organization id -> events this month
 
 	orgs       map[string]data.Organization         // organization id hex -> organization
 	orgMembers map[string][]data.OrganizationMember // organization id hex -> members
@@ -53,6 +55,7 @@ type fakeLogger struct {
 	revokedKeys     []data.RPCRevokeAPIKeyArgs
 	upsertedUsers   []data.RPCUpsertUserArgs
 	accessChecks    int // ProjectAccess calls
+	quotaLookups    int // ProjectQuota calls
 
 	createdOrgs       []data.RPCCreateOrganizationArgs
 	updatedOrgs       []data.RPCUpdateOrganizationArgs
@@ -103,6 +106,7 @@ func newFakeLogger() *fakeLogger {
 		plaintext: map[string]string{},
 		users:     map[int64]data.User{},
 		plans:     map[string]string{},
+		monthUsed: map[string]int64{},
 
 		orgs:       map[string]data.Organization{},
 		orgMembers: map[string][]data.OrganizationMember{},
@@ -281,6 +285,39 @@ func (f *fakeLogger) ProjectPlan(args *data.RPCProjectIDArgs, reply *string) err
 	}
 	*reply = plan
 	return nil
+}
+
+// ProjectQuota answers the plan setPlan gave the project, in the organization
+// quotaOrganization names, with the events setMonthUsed gave that
+// organization.
+func (f *fakeLogger) ProjectQuota(args *data.RPCProjectIDArgs, reply *data.ProjectQuota) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.quotaLookups++
+	if err := checkObjectID("ProjectQuota", args.ID); err != nil {
+		return err
+	}
+	p, ok := f.projects[args.ID]
+	if !ok {
+		return errNoDocuments
+	}
+	plan, ok := f.plans[args.ID]
+	if !ok {
+		return fmt.Errorf("ProjectQuota: project %s: %w", args.ID, data.ErrUnknownOrganization)
+	}
+	org := quotaOrganization(p)
+	*reply = data.ProjectQuota{OrganizationID: org, Plan: plan, Month: data.UsageMonth(time.Now()), Events: f.monthUsed[org]}
+	return nil
+}
+
+// quotaOrganization is the organization the fake counts a project's quota
+// against: the one putInOrganization put it in, or one of its own.
+func quotaOrganization(p data.Project) string {
+	if !p.OrganizationID.IsZero() {
+		return p.OrganizationID.Hex()
+	}
+	return "org-of-" + p.ID.Hex()
 }
 
 // RecordUsage records the flush, or fails it when failRecordUsage is set.
@@ -817,6 +854,14 @@ func (f *fakeLogger) addProject(id, name, slug string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.projects[id] = data.Project{ID: mustObjectID(id), Name: name, Slug: slug}
+}
+
+// setMonthUsed sets the events the organization of the project has ingested
+// this month, as ProjectQuota answers it.
+func (f *fakeLogger) setMonthUsed(projectID string, events int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.monthUsed[quotaOrganization(f.projects[projectID])] = events
 }
 
 // setPlan puts the project in an organization on plan.

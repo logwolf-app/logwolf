@@ -69,7 +69,7 @@ Organizations sit above projects and hold the plan. Their members are always use
 | `RPCServer.ListUserOrganizations`        | `RPCUserOrganizationsArgs`            | `[]UserOrganization`   | A user's organizations, each with their role, oldest first                        |
 | `RPCServer.OrganizationAccess`           | `RPCOrganizationAccessArgs`           | `OrganizationAccess`   | Whether the organization exists, and the caller's role in it (empty for none)     |
 | `RPCServer.ListOrganizationMembers`      | `RPCOrganizationIDArgs`               | `[]OrganizationMember` | The members, under the login of their last sign-in where there is one             |
-| `RPCServer.OrganizationUsage`            | `RPCOrganizationIDArgs`               | `OrganizationUsage`    | How many projects and members the organization has, against its plan's limits     |
+| `RPCServer.OrganizationUsage`            | `RPCOrganizationIDArgs`               | `OrganizationUsage`    | Its projects, members and events this month, against its plan's limits            |
 | `RPCServer.AddOrganizationMember`        | `RPCAddOrganizationMemberArgs`        | `string`               | Add a user; a second membership of one user is a duplicate key error              |
 | `RPCServer.RemoveOrganizationMember`     | `RPCRemoveOrganizationMemberArgs`     | `string`               | Remove a membership by its id; never the last owner (`ErrLastOrganizationOwner`)  |
 | `RPCServer.UpdateOrganizationMemberRole` | `RPCUpdateOrganizationMemberRoleArgs` | `string`               | Change a membership's role; never demotes the last owner                          |
@@ -78,9 +78,10 @@ Organizations sit above projects and hold the plan. Their members are always use
 
 Usage is metered here too (see [Usage](#usage)):
 
-| Method                  | Input                | Output   | Description                                                                         |
-| ----------------------- | -------------------- | -------- | ----------------------------------------------------------------------------------- |
-| `RPCServer.RecordUsage` | `RPCRecordUsageArgs` | `string` | Store a Broker's running totals of accepted events and bytes, per project and hour |
+| Method                   | Input                | Output         | Description                                                                          |
+| ------------------------ | -------------------- | -------------- | ------------------------------------------------------------------------------------ |
+| `RPCServer.RecordUsage`  | `RPCRecordUsageArgs` | `string`       | Store a Broker's running totals of accepted events and bytes, per project and hour   |
+| `RPCServer.ProjectQuota` | `RPCProjectIDArgs`   | `ProjectQuota` | A project's organization, its plan, and its events this month, for the monthly quota |
 
 A malformed organization id is an `invalid organization ID` error, for the Broker to answer as 404, like a project's; a malformed member id is an `invalid member ID` error. `CreateOrganization` refuses an organization without a name or a plan (`ErrInvalidOrganization`) or without an owner (`ErrInvalidUser`); `AddOrganizationMember` refuses a member without a positive GitHub user ID or a login (`ErrInvalidUser`), and every member method refuses a role that is not an organization role.
 
@@ -135,6 +136,7 @@ Pre-multi-tenancy builds enforced retention with a single global TTL index on `l
 The `usage` collection holds what each project uses, in hourly buckets: one document per project, hour (`hour`, the start of the hour in UTC) and source (`source`). It has a retention of its own, `data.UsageRetention` (400 days), on a TTL index on `hour`, so usage outlives the logs it counts, however short the project's retention, and outlives a deleted project too.
 
 - **Accepted events.** Each Broker run is a source. `RecordUsage` stores its running totals for each project and hour (`events`, `bytes`), keeping the larger of the stored value and the one sent (`$max`), so a retried flush, or one sent twice, changes nothing. A count under a malformed project id is dropped, not refused, so the Broker does not retry it forever. A project's usage over a window is the sum over its sources (`data.GetProjectUsage`).
+- **Organizations.** Each Broker bucket also names the organization its project is in when the flush arrives (`organization_id`; one whose project is gone keeps the one it named). An organization's events over a window add up its buckets, deleted projects' included (`data.GetOrganizationEvents`, on the `(organization_id, hour)` index), so deleting a project does not give back its share of the monthly quota. `ProjectQuota` answers it for the calendar month (UTC) under way, with the organization and its plan; `OrganizationUsage` includes it as `events`.
 - **Storage.** A background job (`storage.go`) measures every project every `STORAGE_METER_INTERVAL` (1 hour), and once at start: how many logs it stores and their size as BSON documents (`data.MeasureProjectStorage`, the logical size, before compression and without indexes). It writes them to the project's bucket for the hour under the source `storage` (`stored_events`, `stored_bytes`, `measured_at`); a later measure in the same hour replaces it. Each project gets a two-minute timeout of its own, like the retention cleanup, and one that fails or runs out keeps its last measure. The job starts with the retention cleanup, once every `project_id` is an ObjectID.
 
 ## Startup migration

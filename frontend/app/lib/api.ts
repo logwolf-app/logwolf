@@ -95,7 +95,9 @@ export type OrganizationMember = {
 /**
  * An organization's plan, as the broker's `limits.Provider` resolves it, and
  * how much of it the organization uses. 0 in a limit means the plan sets none;
- * for `max_retention_days`, forever. Events are not counted yet.
+ * for `max_retention_days`, forever. `usage.events` is the events its projects
+ * have ingested this calendar month (UTC), as far as the brokers have flushed
+ * them: a minute behind at most.
  */
 export type OrganizationPlan = {
 	plan: {
@@ -105,7 +107,7 @@ export type OrganizationPlan = {
 		max_projects: number;
 		max_members: number;
 	};
-	usage: { projects: number; members: number };
+	usage: { projects: number; members: number; events: number };
 };
 
 /** The signed-in user the broker acts for: their GitHub user ID, and their login. */

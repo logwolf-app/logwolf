@@ -502,6 +502,27 @@ func (r *RPCServer) ProjectPlan(args *data.RPCProjectIDArgs, reply *string) erro
 	return nil
 }
 
+// ProjectQuota answers what the project's events are held to under the monthly
+// event quota (data.ProjectQuota): its organization, that organization's plan,
+// and the events the organization has ingested this month. The hosted
+// edition's limits.Provider builds the project's quota from it.
+func (r *RPCServer) ProjectQuota(args *data.RPCProjectIDArgs, reply *data.ProjectQuota) error {
+	id, err := parseProjectID("ProjectQuota", args.ID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	quota, err := r.models.ProjectQuota(ctx, id, time.Now())
+	if err != nil {
+		log.Println("Error getting project quota:", err)
+		return err
+	}
+	*reply = quota
+	return nil
+}
+
 // UpdateOrganization renames an organization. Its plan is not changed here.
 func (r *RPCServer) UpdateOrganization(args *data.RPCUpdateOrganizationArgs, reply *data.Organization) error {
 	log.Printf("Renaming organization: %s", args.ID)
@@ -572,7 +593,7 @@ func (r *RPCServer) ListOrganizationMembers(args *data.RPCOrganizationIDArgs, re
 }
 
 // OrganizationUsage counts what the organization has of what its plan limits:
-// its projects and members.
+// its projects, its members and its events this month.
 func (r *RPCServer) OrganizationUsage(args *data.RPCOrganizationIDArgs, reply *data.OrganizationUsage) error {
 	orgID, err := parseOrganizationID("OrganizationUsage", args.ID)
 	if err != nil {

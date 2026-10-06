@@ -52,7 +52,7 @@ describe('/organizations/:id/settings', () => {
 	it('loads the organization with the caller’s role, its members and its plan', async () => {
 		const plan = {
 			plan: { name: 'selfhosted', monthly_events: 0, max_retention_days: 0, max_projects: 0, max_members: 0 },
-			usage: { projects: 2, members: 3 },
+			usage: { projects: 2, members: 3, events: 1234 },
 		};
 		api.getOrganizationMembers.mockResolvedValue([]);
 		api.getOrganizationPlan.mockResolvedValue(plan);

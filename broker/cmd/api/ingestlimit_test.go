@@ -323,7 +323,7 @@ func TestIngest_CloudRateIsTheOrganizationsPlan(t *testing.T) {
 	resetAuthCaches(t)
 	fake.setPlan(projAlpha, limits.PlanFree)
 	free, _ := limits.PlanByName(limits.PlanFree)
-	h := (&Config{Events: &fakePublisher{}, Limits: limits.Organizations{PlanOf: projectPlan}}).routes()
+	h := (&Config{Events: &fakePublisher{}, Limits: limits.Organizations{PlanOf: projectPlan, QuotaOf: projectQuota}}).routes()
 	key := seedKey(t, projAlpha, "ingest")
 
 	for sent := 0; sent < free.IngestBurst; sent += maxBatchSize {

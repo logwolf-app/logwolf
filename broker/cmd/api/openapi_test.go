@@ -304,6 +304,14 @@ func overRate(t *testing.T, app *Config) {
 	}
 }
 
+// overQuota puts the key's project in an organization that has used its
+// monthly quota.
+func overQuota(_ *testing.T, app *Config) {
+	lim := newQuotaPlan(1)
+	lim.setUsed(projAlpha, 1)
+	app.Limits = lim
+}
+
 // planUnknown makes every plan lookup fail.
 func planUnknown(_ *testing.T, app *Config) {
 	app.Limits = &ratePlan{err: fmt.Errorf("logger down")}
@@ -352,6 +360,7 @@ func apiCases() []apiCase {
 		{name: "queue fails", method: "POST", pattern: "/logs", body: event, scopes: ingest, setup: queueFails, want: http.StatusServiceUnavailable},
 		{name: "over the key's rate", method: "POST", pattern: "/logs", body: event, scopes: ingest, setup: overRate, want: http.StatusTooManyRequests},
 		{name: "plan unknown", method: "POST", pattern: "/logs", body: event, scopes: ingest, setup: planUnknown, want: http.StatusInternalServerError},
+		{name: "over the monthly quota", method: "POST", pattern: "/logs", body: event, scopes: ingest, setup: overQuota, want: http.StatusTooManyRequests},
 
 		{name: "two events", method: "POST", pattern: "/logs/batch", body: "[" + event + "," + event + "]", scopes: ingest, want: http.StatusAccepted},
 		{name: "no events", method: "POST", pattern: "/logs/batch", body: `[]`, scopes: ingest, want: http.StatusAccepted},
@@ -361,6 +370,7 @@ func apiCases() []apiCase {
 		{name: "queue fails", method: "POST", pattern: "/logs/batch", body: "[" + event + "]", scopes: ingest, setup: queueFails, want: http.StatusServiceUnavailable},
 		{name: "over the key's rate", method: "POST", pattern: "/logs/batch", body: "[" + event + "," + event + "]", scopes: ingest, setup: overRate, want: http.StatusTooManyRequests},
 		{name: "plan unknown", method: "POST", pattern: "/logs/batch", body: "[" + event + "]", scopes: ingest, setup: planUnknown, want: http.StatusInternalServerError},
+		{name: "over the monthly quota", method: "POST", pattern: "/logs/batch", body: "[" + event + "," + event + "]", scopes: ingest, setup: overQuota, want: http.StatusTooManyRequests},
 
 		{name: "first page", method: "GET", pattern: "/logs", target: "/logs", scopes: read, want: http.StatusOK},
 		{name: "largest page", method: "GET", pattern: "/logs", target: fmt.Sprintf("/logs?page=2&pageSize=%d", data.MaxPageSize), scopes: read, want: http.StatusOK},

@@ -50,8 +50,8 @@ func main() {
 	}
 
 	// LOGWOLF_EDITION, self-hosted unless set otherwise. The hosted edition
-	// asks the logger for each project's plan.
-	lim, err := limits.FromEnv(projectPlan)
+	// asks the logger for each project's plan and monthly quota.
+	lim, err := limits.FromEnv(limits.Lookups{Plan: projectPlan, Quota: projectQuota})
 	if err != nil {
 		log.Panic(err)
 	}

@@ -139,7 +139,8 @@ func (app *Config) allowIngest(ctx context.Context, keyID, projectID string, n i
 
 // limitIngest holds n events sent with the request's API key to the key's
 // rate. It answers the request and returns false when they may not be queued:
-// 429 with a Retry-After over the rate, 500 when the plan could not be told.
+// 429 with the code rate_limited and a Retry-After over the rate, 500 when the
+// plan could not be told.
 func (app *Config) limitIngest(w http.ResponseWriter, r *http.Request, n int) bool {
 	keyID, projectID := keyIDFromContext(r), projectIDFromContext(r)
 	allowed, wait, err := app.allowIngest(r.Context(), keyID, projectID, n)
@@ -151,7 +152,7 @@ func (app *Config) limitIngest(w http.ResponseWriter, r *http.Request, n int) bo
 	if !allowed {
 		log.Printf(`{"event":"ingest_limit","outcome":"deny","project_id":"%s","count":%d,"retry_after_ms":%d}`, projectID, n, wait.Milliseconds())
 		setRetryAfter(w, wait)
-		app.errorJSON(w, fmt.Errorf("ingestion rate exceeded for this API key"), http.StatusTooManyRequests)
+		app.errorCodeJSON(w, fmt.Errorf("ingestion rate exceeded for this API key"), http.StatusTooManyRequests, codeRateLimited)
 		return false
 	}
 	return true

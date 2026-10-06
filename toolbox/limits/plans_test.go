@@ -37,6 +37,8 @@ func TestSelfHostedPlan_IsUnlimited(t *testing.T) {
 		MaxRetentionDays: Unlimited,
 		MaxProjects:      Unlimited,
 		MaxMembers:       Unlimited,
+		IngestRate:       Unlimited,
+		IngestBurst:      Unlimited,
 	}
 	if got := SelfHostedPlan(); got != want {
 		t.Errorf("SelfHostedPlan() = %+v, want %+v", got, want)
@@ -56,6 +58,9 @@ func TestHostedPlans_AreLimited(t *testing.T) {
 		}
 		if name != PlanSelfHosted && p.MonthlyEvents <= 0 {
 			t.Errorf("%s: MonthlyEvents = %d, want a quota", name, p.MonthlyEvents)
+		}
+		if name != PlanSelfHosted && p.IngestRate <= 0 {
+			t.Errorf("%s: IngestRate = %d, want a rate", name, p.IngestRate)
 		}
 	}
 }
@@ -101,5 +106,34 @@ func TestPlan_RetentionChoicesAreACopy(t *testing.T) {
 	first[0] = 7
 	if second := SelfHostedPlan().RetentionChoices(); second[0] != 0 {
 		t.Errorf("RetentionChoices changed under its caller: %v", second)
+	}
+}
+
+// A rate goes with a bucket that holds at least a second of it, and no rate
+// with no bucket: a plan with one and not the other would refuse every event or
+// refill nothing.
+func TestPlans_IngestBucketFitsTheRate(t *testing.T) {
+	for name, p := range plans {
+		if p.IngestRate < 0 || p.IngestBurst < 0 {
+			t.Errorf("%s: IngestRate = %d, IngestBurst = %d; want Unlimited or positive", name, p.IngestRate, p.IngestBurst)
+		}
+		if (p.IngestRate == Unlimited) != (p.IngestBurst == Unlimited) {
+			t.Errorf("%s: IngestRate = %d, IngestBurst = %d; want both Unlimited or neither", name, p.IngestRate, p.IngestBurst)
+		}
+		if p.IngestBurst < p.IngestRate {
+			t.Errorf("%s: IngestBurst = %d holds less than a second of IngestRate = %d", name, p.IngestBurst, p.IngestRate)
+		}
+	}
+}
+
+func TestPlans_ListsTheTable(t *testing.T) {
+	got := Plans()
+	if len(got) != len(plans) {
+		t.Fatalf("Plans() has %d plans, want %d", len(got), len(plans))
+	}
+	for _, p := range got {
+		if plans[p.Name] != p {
+			t.Errorf("Plans() has %+v, the table %+v", p, plans[p.Name])
+		}
 	}
 }

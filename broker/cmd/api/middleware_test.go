@@ -275,4 +275,8 @@ func TestRequireAPIKey_RateLimit(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Errorf("expected 429, got %d", w.Code)
 	}
+	// The window started with the first failure, a moment ago.
+	if got := w.Header().Get("Retry-After"); got != "60" {
+		t.Errorf("Retry-After = %q, want the window's remaining 60 seconds", got)
+	}
 }

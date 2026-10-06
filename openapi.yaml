@@ -35,7 +35,16 @@ info:
     Failed authentications are counted per client address: once an address
     has failed 10 times within a minute of its first failure, every request
     from it is answered `429` until that minute is up, whatever key it sends.
-    Requests that authenticate are not limited.
+
+    Ingestion is also limited per API key, by the plan of the key's project:
+    each key has a bucket of events that refills at a steady rate, and each
+    event sent takes one. A request whose events do not fit is refused whole
+    with a `429`, and nothing of it is queued. A batch larger than the bucket
+    goes through once the bucket is full, and empties it. Self-hosted
+    installs set no rate.
+
+    Every `429` carries `Retry-After`, in seconds: how long until the request
+    would be accepted. Waiting that long, then retrying, is enough.
 
     ## Responses
 
@@ -101,7 +110,7 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '429':
-          $ref: '#/components/responses/TooManyRequests'
+          $ref: '#/components/responses/IngestTooManyRequests'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -227,7 +236,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '429':
-          $ref: '#/components/responses/TooManyRequests'
+          $ref: '#/components/responses/IngestTooManyRequests'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -363,12 +372,27 @@ components:
             $ref: '#/components/schemas/Error'
     TooManyRequests:
       description: This client address has failed to authenticate too often. Try again within a minute.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    IngestTooManyRequests:
+      description: |
+        This client address has failed to authenticate too often, or the
+        key's events have run past its ingestion rate. Nothing is queued;
+        retry after `Retry-After` seconds.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     InternalError:
-      description: The key could not be checked or the logger could not be reached. Safe to retry.
+      description: The key, or the plan that sets its ingestion rate, could not be checked, or the logger could not be reached. Safe to retry.
       content:
         application/json:
           schema:
@@ -379,6 +403,14 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+
+  headers:
+    RetryAfter:
+      description: Whole seconds until the request would be accepted; at least 1.
+      required: true
+      schema:
+        type: integer
+        minimum: 1
 
   schemas:
     Severity:

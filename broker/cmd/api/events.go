@@ -41,6 +41,9 @@ func eventMessage(p data.JSONLogPayload) (event.Message, error) {
 // them are checked and encoded before any is sent, so a bad one sends none. A
 // batch that fails part-way may have queued some; a client that retries it can
 // store those twice.
+//
+// Events sent with an API key are then held to the key's rate (limitIngest), a
+// token per event; those the dashboard sends have no key and no rate.
 func (app *Config) publishEvents(w http.ResponseWriter, r *http.Request, payloads ...data.JSONLogPayload) {
 	msgs := make([]event.Message, len(payloads))
 	for i, p := range payloads {
@@ -60,6 +63,10 @@ func (app *Config) publishEvents(w http.ResponseWriter, r *http.Request, payload
 			return
 		}
 		msgs[i] = m
+	}
+
+	if keyIDFromContext(r) != "" && !app.limitIngest(w, r, len(msgs)) {
+		return
 	}
 
 	if app.Events == nil {

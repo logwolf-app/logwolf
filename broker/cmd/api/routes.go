@@ -16,7 +16,7 @@ func (app *Config) routes() http.Handler {
 		AllowedOrigins:   []string{"https://*", "http://*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Internal-Secret", "X-User-ID", "X-User-Login"},
-		ExposedHeaders:   []string{"Link"},
+		ExposedHeaders:   []string{"Link", "Retry-After"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))

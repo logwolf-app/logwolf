@@ -33,6 +33,9 @@ const themeScript = `
 `;
 
 const logMiddleware: Route.MiddlewareFunction = async function ({ request, params, context }, next) {
+	// Without API_KEY there is no client: routes find no event in context.
+	if (!logwolf) return next();
+
 	const event = new LogwolfEvent({
 		name: 'Server Event',
 		severity: 'info',

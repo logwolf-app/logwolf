@@ -235,6 +235,8 @@ Event payloads come back exactly as the broker stores them, so `getLogs`/`getLog
 
 `lib/logwolf.ts` initialises the Logwolf JS SDK. `root.tsx` wires it into the React Router middleware so every navigation and unhandled error is captured automatically.
 
+It is optional: with `API_KEY` unset or blank, `logwolfFromEnv` returns no client, so a fresh install boots before anyone has made a key on the Keys page. The middleware then puts no event in context (routes already read it as `event?.`), and `handleError` logs server errors to the console instead. A key that is set but malformed still fails at start, from the SDK's own validation.
+
 ## Environment variables
 
 | Variable                       | Description                                                          |
@@ -246,6 +248,7 @@ Event payloads come back exactly as the broker stores them, so `getLogs`/`getLog
 | `LOGWOLF_ALLOWED_GITHUB_USERS` | Comma-separated list of allowed GitHub usernames                     |
 | `LOGWOLF_ALLOWED_GITHUB_ORGS`  | Comma-separated list of GitHub orgs whose members are allowed        |
 | `SESSION_SECRET`               | Signs session cookies; the key sealing GitHub tokens derives from it |
+| `API_KEY`                      | Optional `lw_` key for the dashboard's own telemetry                 |
 | `LOGWOLF_EDITION`              | `selfhosted` (default) picks the allowlist as the `SignupPolicy`     |
 
 Copy `.env.example` to `.env` before running locally.

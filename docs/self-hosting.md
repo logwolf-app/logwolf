@@ -60,7 +60,7 @@ Create a `.env` file in the repository root. The full reference:
 | `LOGWOLF_ALLOWED_GITHUB_USERS`   | ✅ (one of)   | Comma-separated list of GitHub usernames allowed to access the dashboard                                                                                                                 |
 | `LOGWOLF_ALLOWED_GITHUB_ORGS`    | ✅ (one of)   | Comma-separated list of GitHub orgs. Any member is allowed.                                                                                                                              |
 | `LOGWOLF_DEFAULT_PROJECT_OWNERS` | Upgrades only | GitHub usernames made owners of the `Default` project that holds pre-multi-tenancy data, on top of `LOGWOLF_ALLOWED_GITHUB_USERS`; when there is no such project, they own the deployment's organization instead. Needed for org-only deployments. Read on every start. |
-| `API_KEY`                        | ✅            | An `lw_`-prefixed API key used by the frontend to instrument itself. Generate one after first boot.                                                                                      |
+| `API_KEY`                        | No           | An `lw_`-prefixed API key the frontend uses to instrument itself. Generate one after first boot. Unset, the dashboard runs without its own telemetry.                                    |
 | `TRUSTED_PROXIES`                | No            | IPs/CIDR ranges whose `X-Forwarded-For` the broker believes, to rate-limit failed API key attempts per client. Compose trusts private ranges; narrow it if you publish the broker port.  |
 | `MONGO_USERNAME`                 | ✅            | MongoDB root user. Read by MongoDB only when its data directory is first created; see Updating.                                                                                          |
 | `MONGO_PASSWORD`                 | ✅            | Its password. Minimum 32 random bytes on a new install.                                                                                                                                  |
@@ -86,7 +86,6 @@ MONGO_USERNAME=logwolf
 MONGO_PASSWORD=<output of openssl rand -hex 32>
 RABBITMQ_USERNAME=logwolf
 RABBITMQ_PASSWORD=<output of openssl rand -hex 32>
-API_KEY=lw_<your key from the Keys page>
 LOGWOLF_VERSION=1.2.0
 ```
 

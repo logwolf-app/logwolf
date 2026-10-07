@@ -3,8 +3,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/rpc"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,6 +47,8 @@ type fakeLogger struct {
 
 	// Recorded calls, for asserting what the broker forwarded.
 	getLogsParams   []data.QueryParams
+	searchArgs      []data.RPCSearchLogsArgs
+	countArgs       []data.RPCCountLogsArgs
 	retentionArgs   []data.RetentionArgs
 	metricsArgs     []data.ProjectArgs
 	createdProjects []data.RPCCreateProjectArgs
@@ -70,6 +75,7 @@ type fakeLogger struct {
 	lastOwnerLogin    string             // RemoveMember and UpdateMemberRole refuse to remove or demote this login
 	status            *data.LoggerStatus // what Status answers; nil is ready
 	failRecordUsage   bool               // RecordUsage fails, as an unreachable database would
+	failReads         bool               // SearchLogs and CountLogs fail, as an unreachable database would
 
 	// openConns counts the broker's connections the fake has not yet seen
 	// closed. It goes back to zero only if every handler closed its client.
@@ -420,6 +426,78 @@ func (f *fakeLogger) GetLogs(p data.QueryParams, reply *[]data.LogEntry) error {
 
 	f.getLogsParams = append(f.getLogsParams, p)
 	*reply = append([]data.LogEntry(nil), f.logs[p.ProjectID]...)
+	return nil
+}
+
+// matches is the fake's reading of a data.LogQuery: severity, name, tags and
+// text, as the real filter matches them. The time window is not applied; the
+// broker's reading of since and until is checked on the recorded arguments.
+func matches(e data.LogEntry, q data.LogQuery) bool {
+	if len(q.Severities) > 0 && !slices.ContainsFunc(q.Severities, func(s string) bool { return strings.EqualFold(strings.TrimSpace(s), e.Severity) }) {
+		return false
+	}
+	if q.Name != "" && e.Name != q.Name {
+		return false
+	}
+	for _, tag := range q.Tags {
+		if !slices.Contains(e.Tags, tag) {
+			return false
+		}
+	}
+	text := strings.ToLower(q.Text)
+	return text == "" || strings.Contains(strings.ToLower(e.Name), text) || strings.Contains(strings.ToLower(e.Data), text)
+}
+
+func (f *fakeLogger) SearchLogs(args *data.RPCSearchLogsArgs, reply *data.SearchLogsReply) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.searchArgs = append(f.searchArgs, *args)
+	if err := checkObjectID("SearchLogs", args.ProjectID); err != nil {
+		return err
+	}
+	if f.failReads {
+		return fmt.Errorf("SearchLogs find: server selection error: context deadline exceeded")
+	}
+	var found []data.LogEntry
+	for _, e := range f.logs[args.ProjectID] {
+		if matches(e, args.Query) {
+			found = append(found, e)
+		}
+	}
+	p := args.Pagination
+	from := min(int64(len(found)), (p.Page-1)*p.PageSize)
+	to := min(int64(len(found)), from+p.PageSize)
+	reply.Logs = append([]data.LogEntry{}, found[from:to]...)
+	reply.HasMore = to < int64(len(found))
+	return nil
+}
+
+func (f *fakeLogger) CountLogs(args *data.RPCCountLogsArgs, reply *data.LogCounts) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.countArgs = append(f.countArgs, *args)
+	if err := checkObjectID("CountLogs", args.ProjectID); err != nil {
+		return err
+	}
+	if f.failReads {
+		return fmt.Errorf("CountLogs aggregate: server selection error: context deadline exceeded")
+	}
+	// Grouped by severity alone, which is all the tests ask the fake for.
+	reply.Groups = []data.LogCount{}
+	bySeverity := map[string]int64{}
+	for _, e := range f.logs[args.ProjectID] {
+		if matches(e, args.Query) {
+			reply.Total++
+			bySeverity[e.Severity]++
+		}
+	}
+	if args.GroupBy == data.GroupBySeverity {
+		for _, s := range slices.Sorted(maps.Keys(bySeverity)) {
+			reply.Groups = append(reply.Groups, data.LogCount{Key: s, Count: bySeverity[s]})
+		}
+	}
 	return nil
 }
 

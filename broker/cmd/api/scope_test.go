@@ -64,6 +64,7 @@ var publicRoutes = []struct {
 	{http.MethodGet, "/logs", ``, data.ScopeRead},
 	{http.MethodGet, "/logs/" + alphaLogID, ``, data.ScopeRead},
 	{http.MethodDelete, "/logs", `{}`, data.ScopeDelete},
+	{http.MethodPost, "/mcp", mcpInitialize, data.ScopeRead},
 }
 
 // TestPublicRoutes_IngestOnlyKeyCannotReadOrDelete is the issue's acceptance

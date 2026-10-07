@@ -28,6 +28,10 @@ export default defineConfig({
 				items: [{ text: 'JavaScript', link: '/sdk/js' }],
 			},
 			{
+				text: 'Integrations',
+				items: [{ text: 'AI agents (MCP)', link: '/mcp' }],
+			},
+			{
 				text: 'Reference',
 				items: [{ text: 'HTTP API', link: '/api' }],
 			},

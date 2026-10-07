@@ -21,12 +21,13 @@ Your instance serves the API under `/api`, e.g. `https://logs.your-domain.com/ap
 | `GET`    | `/logs`       | `read`   | List events, newest first, a page at once |
 | `GET`    | `/logs/{id}`  | `read`   | Get one event                             |
 | `DELETE` | `/logs`       | `delete` | Delete one event                          |
+| `POST`   | `/mcp`        | `read`   | The MCP server for AI agents ([guide](/mcp)) |
 | `GET`    | `/health`     | —        | Whether the instance can take events now  |
 | `GET`    | `/ping`       | —        | Whether the broker is running             |
 
 ## Authentication
 
-The `/logs` routes take a project API key as a Bearer token:
+The `/logs` routes and `/mcp` take a project API key as a Bearer token:
 
 ```http
 POST /api/logs HTTP/1.1
@@ -61,7 +62,7 @@ Every `429` carries `Retry-After`, the whole seconds until the request would be 
 
 ## Responses
 
-Responses are JSON envelopes. `error` says whether the request failed and `message` describes the outcome for people; on success, `data` holds the result:
+Responses are JSON envelopes, except `/mcp`'s, which are JSON-RPC messages ([AI agents](/mcp)). `error` says whether the request failed and `message` describes the outcome for people; on success, `data` holds the result:
 
 ```json
 { "error": false, "message": "OK!", "data": { "id": "66f1c0ffee0000000000abcd", "name": "checkout.completed", "severity": "info" } }

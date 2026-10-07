@@ -3,14 +3,14 @@
 }
 
 localhost {
-    # The broker serves two kinds of routes. Public ones: the SDK's /logs,
-    # which take an API key, and /health and /ping. Dashboard ones, everything
+    # The broker serves two kinds of routes. Public ones: the SDK's /logs
+    # and the MCP server's /mcp, which take an API key, and /health and /ping. Dashboard ones, everything
     # under /projects: they take the internal secret and then believe whatever
     # X-User-Login says, so only the frontend may call them, and it does so on
     # the internal network. Caddy forwards the public ones alone; anything else
     # under /api stops here.
     handle /api/* {
-        @public path /api/logs /api/logs/* /api/health /api/ping
+        @public path /api/logs /api/logs/* /api/mcp /api/health /api/ping
         handle @public {
             uri strip_prefix /api
             reverse_proxy broker:80

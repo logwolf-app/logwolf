@@ -9,22 +9,23 @@ info:
     identifier: GPL-3.0-only
   description: |
     The routes an application reaches over the internet: the SDK's event
-    routes, which take an API key, and the health checks, which take nothing.
-    The dashboard's routes are internal and are not part of this API.
+    routes and the MCP server for AI agents, which take an API key, and the
+    health checks, which take nothing. The dashboard's routes are internal
+    and are not part of this API.
 
     ## Authentication
 
-    Every `/logs` route takes a project API key as a Bearer token:
+    Every `/logs` route, and `/mcp`, takes a project API key as a Bearer token:
     `Authorization: Bearer lw_...`. Keys are created on the dashboard's Keys
     page, and the key decides the project: there is no project parameter.
 
     A key carries scopes, and each route demands one:
 
-    | Scope    | Routes                               |
-    | -------- | ------------------------------------ |
-    | `ingest` | `POST /logs`, `POST /logs/batch`     |
-    | `read`   | `GET /logs`, `GET /logs/{id}`        |
-    | `delete` | `DELETE /logs`                       |
+    | Scope    | Routes                                       |
+    | -------- | -------------------------------------------- |
+    | `ingest` | `POST /logs`, `POST /logs/batch`             |
+    | `read`   | `GET /logs`, `GET /logs/{id}`, `POST /mcp`   |
+    | `delete` | `DELETE /logs`                               |
 
     A new key gets `ingest` alone unless its creator picks more, since keys
     ship in browser bundles. Keys created before scopes existed have all
@@ -73,6 +74,16 @@ info:
     not yet stored. It is readable once the listener has stored it, usually
     within a moment. Delivery is at least once.
 
+    ## MCP
+
+    `POST /mcp` serves the [Model Context Protocol](https://modelcontextprotocol.io)
+    over its Streamable HTTP transport, so AI agents can read and analyze
+    the key's project's events with read-only tools. It is stateless: it
+    hands out no session, answers each request in JSON, never as an event
+    stream, and refuses `GET` and `DELETE` with `405`. Its answers are
+    JSON-RPC messages, not the envelope below; a tool that fails says so in
+    its result, with `isError`, and still answers `200`.
+
     ## CORS
 
     Browsers may call every route from any `http` or `https` origin.
@@ -91,6 +102,8 @@ servers:
 tags:
   - name: Events
     description: Sending, reading and deleting events. Each takes an API key.
+  - name: MCP
+    description: The Model Context Protocol server, for AI agents. Takes an API key.
   - name: Health
     description: Liveness and readiness checks. They take no credentials.
 
@@ -292,6 +305,80 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /mcp:
+    post:
+      tags: [MCP]
+      operationId: mcp
+      summary: Model Context Protocol
+      description: |
+        One JSON-RPC message from an MCP client, over the Streamable HTTP
+        transport. Clients connect to this URL with the key in an
+        `Authorization` header; see the documentation site's MCP page.
+
+        The tools read the key's project alone, and change nothing:
+
+        - `get_project_overview`: totals, the last 24 hours, top tags, retention.
+        - `search_events`: events by severity, name, tags, text and time, newest first.
+        - `get_event`: one event, with its full data.
+        - `count_events`: counts, per severity, name, tag, hour or day.
+      security:
+        - apiKey: [read]
+      parameters:
+        - name: Accept
+          in: header
+          required: true
+          description: Must name both `application/json` and `text/event-stream`, as the transport demands. Answers are JSON all the same.
+          schema:
+            type: string
+            example: application/json, text/event-stream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JsonRpcMessage'
+      responses:
+        '200':
+          description: |
+            The answer to a request. A tool that failed, because its
+            arguments were wrong or events could not be read, answers here
+            too, with `isError` in its result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcResponse'
+        '202':
+          description: A notification or a response was taken. It has no answer.
+        '400':
+          description: |
+            The body is not a JSON-RPC message, names a method the server does
+            not have, or `Accept` or `MCP-Protocol-Version` is not one the
+            transport takes.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: The body is larger than 64 KiB.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '415':
+          description: The body is not `application/json`.
+          content:
+            text/plain:
+              schema:
+                type: string
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -579,6 +666,42 @@ components:
             code:
               type: string
               enum: [rate_limited, quota_exceeded]
+
+    JsonRpcMessage:
+      type: object
+      required: [jsonrpc]
+      description: A JSON-RPC 2.0 request, notification or response, as MCP defines them.
+      properties:
+        jsonrpc:
+          const: '2.0'
+        id:
+          type: [string, integer]
+          description: Left out of a notification.
+        method:
+          type: string
+          example: tools/call
+        params:
+          type: object
+
+    JsonRpcResponse:
+      type: object
+      required: [jsonrpc, id]
+      description: The answer to a JSON-RPC 2.0 request; `result` on success, `error` otherwise.
+      properties:
+        jsonrpc:
+          const: '2.0'
+        id:
+          type: [string, integer]
+        result:
+          type: object
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: integer
+            message:
+              type: string
 
     Health:
       type: object

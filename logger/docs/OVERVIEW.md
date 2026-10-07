@@ -30,7 +30,11 @@ The RPC server is exposed via Go's standard `net/rpc` package on TCP port 5001.
 | `RPCServer.LogInfo`   | `RPCLogPayload`     | `string`     | Insert one log entry, unless its project is gone   |
 | `RPCServer.GetLogs`   | `QueryParams`       | `[]LogEntry` | Query logs with optional filtering and pagination  |
 | `RPCServer.GetLog`    | `RPCLogEntryFilter` | `LogEntry`   | Fetch one entry by id within a project             |
+| `RPCServer.SearchLogs` | `RPCSearchLogsArgs` | `SearchLogsReply` | One page of a project's logs matching a `LogQuery`, newest first, and whether more follow |
+| `RPCServer.CountLogs` | `RPCCountLogsArgs`  | `LogCounts`  | Count a project's logs matching a `LogQuery`, in total or per severity, name, tag, hour or day |
 | `RPCServer.DeleteLog` | `RPCLogEntryFilter` | `int64`      | Delete matching log entries; returns count deleted |
+
+`SearchLogs` and `CountLogs` serve the Broker's MCP tools (`toolbox/data/search.go`). A `data.LogQuery` narrows by severities (normalized, as the metrics count them), exact name, every one of some tags, text in the name or data (literal, case-insensitive, at most 200 bytes) and a `[since, until)` window on `created_at`. Every filter starts with the project, and searches sort like `AllLogs`, so `project_id_created_at` serves them. `CountLogs` is one `$facet`: the total, and the groups, one more than the limit to tell whether any were left out; severities are lower-cased when grouped, so events stored before normalization count with the rest. They are their own methods rather than a filter on `GetLogs`, so a Broker newer than its Logger is refused instead of handed every log.
 
 `RPCServer.ProjectAccess` (`RPCProjectAccessArgs` → `ProjectAccess`) answers every Broker access check in one call: whether the project exists, and the caller's role in it (empty for a non-member). An owner of the project's organization is owner of the project, member or not (`data.AccessToProject`), and `ListUserProjects` lists those projects too. The caller is a GitHub user ID, with their current login for memberships stored before user IDs (`data.MemberFilter`); `ListUserProjects` takes the same pair. A malformed project id is an `invalid project ID` error, which the Broker answers as 404.
 

@@ -145,6 +145,14 @@ func TestProjectScopedMethods_MalformedProjectID(t *testing.T) {
 			var reply []data.LogEntry
 			return srv.GetLogs(data.QueryParams{ProjectID: bad}, &reply)
 		},
+		"SearchLogs": func() error {
+			var reply data.SearchLogsReply
+			return srv.SearchLogs(&data.RPCSearchLogsArgs{ProjectID: bad}, &reply)
+		},
+		"CountLogs": func() error {
+			var reply data.LogCounts
+			return srv.CountLogs(&data.RPCCountLogsArgs{ProjectID: bad}, &reply)
+		},
 		"GetLog": func() error {
 			var reply data.LogEntry
 			return srv.GetLog(data.RPCLogEntryFilter{ID: primitive.NewObjectID().Hex(), ProjectID: bad}, &reply)

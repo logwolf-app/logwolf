@@ -117,6 +117,44 @@ func (r *RPCServer) GetLogs(p data.QueryParams, resp *[]data.LogEntry) error {
 	return nil
 }
 
+// SearchLogs returns one page of a project's logs that match args.Query, newest
+// first. It is its own method rather than a filter on GetLogs, so a broker that
+// sends a query to a logger without one is refused instead of being handed
+// every log.
+func (r *RPCServer) SearchLogs(args *data.RPCSearchLogsArgs, reply *data.SearchLogsReply) error {
+	projectID, err := parseProjectID("SearchLogs", args.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	result, err := r.models.SearchLogs(projectID, args.Query, args.Pagination)
+	if err != nil {
+		log.Println("Error searching logs:", err)
+		return err
+	}
+
+	*reply = *result
+	return nil
+}
+
+// CountLogs counts a project's logs that match args.Query, grouped by
+// args.GroupBy when it names a grouping.
+func (r *RPCServer) CountLogs(args *data.RPCCountLogsArgs, reply *data.LogCounts) error {
+	projectID, err := parseProjectID("CountLogs", args.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	result, err := r.models.CountLogs(projectID, *args)
+	if err != nil {
+		log.Println("Error counting logs:", err)
+		return err
+	}
+
+	*reply = *result
+	return nil
+}
+
 // GetLog fetches a single entry by id. The project is part of the query rather
 // than a check layered on top of it, so an id belonging to another project
 // comes back as "no documents in result" — the same as one that never existed.
